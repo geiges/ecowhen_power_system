@@ -1,0 +1,46 @@
+[project]
+name = "ecowhen-power-system"
+version = "0.1.0"
+description = "Four-process power system: system model, actuation gateway, logger and control brain"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=2.4.1",
+    "pytz>=2025.2",
+    "pyyaml>=6.0",
+    "requests>=2.32",
+    "python-dotenv>=1.0",
+    "flask>=3.0",
+]
+
+[project.optional-dependencies]
+# pydbus needs system gobject bindings; only the Power System process needs it,
+# and only on the Venus OS device. Off-device tests use mock_dbus_service.py.
+device = ["pydbus"]
+
+[project.scripts]
+ecops-power-system = "ecowhen_power_system.power_system_main:main"
+ecops-gateway = "ecowhen_power_system.gateway_main:main"
+ecops-logger = "ecowhen_power_system.logger_main:main"
+ecops-control = "ecowhen_power_system.control_main:main"
+
+[dependency-groups]
+dev = ["pytest>=9.0.2", "pytest-flask>=1.3"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = [".", "tests"]
+filterwarnings = [
+    # kalman.py is built on np.matrix, which numpy has pending-deprecated. Left as
+    # harvested, on purpose: porting to ndarray silently changes `*` from
+    # matrix-multiply to element-wise, and a Kalman filter that is quietly wrong is
+    # far worse than one that raises a deprecation notice. 30 of these per run drown
+    # warnings that do matter, so they are filtered rather than fixed.
+    # ponytail: revisit only if numpy actually removes np.matrix; the port then needs
+    # each `*` audited into an explicit `@`, with the SOC output diffed before/after.
+    "ignore:the matrix subclass is not the recommended way:PendingDeprecationWarning",
+]
