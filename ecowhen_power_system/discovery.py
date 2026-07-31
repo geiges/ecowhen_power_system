@@ -198,6 +198,9 @@ def discover(bus, config):
 
     components_status = {}
     for short_name, component in psystem.items():
+        
+        if component.hardware is None:
+            continue
         service = component.get_interface(bus)
         components_status[short_name] = {
             "product_name": component.product_name,

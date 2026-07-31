@@ -7,8 +7,11 @@ from conftest import MPPT100, MULTIPLUS, FakeBus, phoenix_service
 
 
 def test_discovers_every_configured_component(system_config):
+
     comps = system_config["components"]
-    assert set(comps) == {"system", "mppt150", "mppt100", "multiplus", "phoenix"}
+    assert set(comps) == {"system", "mppt150", "mppt100", "multiplus", "phoenix",
+                          'DS18B20_inside', 'DS18B20_DC_multiplus', 'DS18B20_shunt'
+                          }, print(set(comps))
     assert comps["multiplus"]["service"] == MULTIPLUS
 
     # phoenix is configured but has never been on the real bus, so it is reported

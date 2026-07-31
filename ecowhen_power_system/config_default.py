@@ -41,7 +41,6 @@ PV_componentes = {
 # 8-cell LiFePo4 battery, 210Ah. Not a D-Bus device, so it is kept out of
 # system_components (the discovery list); it feeds the battery simulation.
 battery = components.Generic_Battery("battery",
-                           component_type='battery',
                            cell_type='lifepo4',
                            n_cells=8,
                            capacity_ah=210)
@@ -53,12 +52,13 @@ battery.init_equivalent_circuit_model(R0=0.01,
 #system setup
 system_components = [
     components.VictronSystem(None, short_name='system'),
-    components.VictronSolarCharger('SmartSolar Charger MPPT 150/35',
+    battery,
+    components.VictronSolarMPPT('SmartSolar Charger MPPT 150/35',
                                    short_name='mppt150',
                                    const_consumption=0.05,
                                    connected_PV = PV_componentes['large_array']
                                    ),
-    components.VictronSolarChargerWithDCLoad('SmartSolar Charger MPPT 100/20 48V',
+    components.VictronSolarMPPTWithDCLoad('SmartSolar Charger MPPT 100/20 48V',
                                    short_name='mppt100',
                                    const_consumption=0.05,
                                    connected_PV = PV_componentes['small_array']
@@ -70,7 +70,16 @@ system_components = [
     components.VictronPhoenix24_800('Phoenix Inverter 24V 800VA 230V', 
                                     short_name='phoenix',
                                     const_consumption=0.1
-                                    )
+                                    ),
+    components.Generic_DS18B20_Temperature_Sensor(product_name='1Wire Sensor 28-000000c8e009', 
+                                        short_name = 'DS18B20_DC_multiplus', 
+                                        ),
+    components.Generic_DS18B20_Temperature_Sensor(product_name='1Wire Sensor 28-0000002146e4', 
+                                        short_name = 'DS18B20_shunt', 
+                                        ),
+    components.Generic_DS18B20_Temperature_Sensor(product_name='1Wire Sensor 28-000000228b7c', 
+                                        short_name = 'DS18B20_inside', 
+                                        ),
     ]
 
 # system connectors (relevant for measurements)

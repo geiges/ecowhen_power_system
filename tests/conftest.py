@@ -26,7 +26,9 @@ MPPT100 = "com.victronenergy.solarcharger.ttyUSB1"
 MULTIPLUS = "com.victronenergy.vebus.ttyUSB2"
 PHOENIX = "com.victronenergy.inverter.ttyUSB3"
 SYSTEM = "com.victronenergy.system"
-
+TEMP_MULTIPLUS = "com.victronenergy.temperature.Wire_id02"
+TEMP_SHUNT = "com.victronenergy.temperature.Wire_id03"
+TEMP_INTERIOR = "com.victronenergy.temperature.Wire_id04"
 
 class _FakeItem:
     def __init__(self, value):
@@ -82,6 +84,14 @@ def _solarcharger(product_name, *, load=False):
         values["/Load/State"] = 1     # 1 == "off" per the load_state mapping
     return values
 
+def _DS18B20(product_name, *, load=False):
+    values = {
+        "/ProductName": product_name,
+        "/Temperature": 20.3,
+        "/Status": 0,
+        "/Connected": 1,
+    }
+    return values
 
 def phoenix_service():
     """The Phoenix inverter, for tests that need it present.
@@ -125,6 +135,9 @@ def bus_values():
             "/Alarms/Overload": 0,
             "/Mode": 3,       # 3 == "on" per the inverter_mode mapping
         },
+        TEMP_MULTIPLUS : _DS18B20("1Wire Sensor 28-000000c8e009"),
+        TEMP_SHUNT : _DS18B20('1Wire Sensor 28-0000002146e4'),
+        TEMP_INTERIOR : _DS18B20('1Wire Sensor 28-000000228b7c'),
     }
 
 

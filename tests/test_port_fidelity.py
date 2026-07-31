@@ -31,8 +31,11 @@ def test_battery_model_constants_match_the_installation():
 def test_expected_components_are_configured():
     """Discovery is driven off these lists; a dropped entry silently stops logging it."""
     assert [c.short_name for c in config.system_components] == [
-        "system", "mppt150", "mppt100", "multiplus", "phoenix",
+        "system", "battery", "mppt150", "mppt100", "multiplus", "phoenix",
+        'DS18B20_DC_multiplus','DS18B20_shunt', 'DS18B20_inside', 
     ]
     assert [c.short_name for c in config.aux_components] == [
         "wallbox", "ac_inverter", "ac_mppt",
     ]
+
+ 

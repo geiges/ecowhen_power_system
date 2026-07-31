@@ -85,6 +85,7 @@ def test_setup_publishes_the_topology_contract(fake_bus, runtime_dirs, monkeypat
     written = yaml.safe_load(runtime_dirs.SYSTEM_CONFIG_PATH.read_text())
     assert set(written["components"]) == {
         "system", "mppt150", "mppt100", "multiplus", "phoenix",
+        'DS18B20_DC_multiplus','DS18B20_shunt', 'DS18B20_inside', 
     }
     assert "variables_to_log" in written
     assert "actuators" in written

@@ -54,6 +54,9 @@ class Power_system(dict):
         #loop over configures system components
         for component in self.values():
             
+            if component.hardware is None:
+                continue
+            
             if component.is_avaiable_on_bus(dbus):
                 variables_of_device = component.get_device_variables(dbus)
                 # component is currently connected
@@ -79,6 +82,9 @@ class Power_system(dict):
         
         #loop over configures system components
         for component in self.values():
+            
+            if component.hardware is None:
+                continue
             
             if component.is_avaiable_on_bus(dbus):
                 # component is currently connected
