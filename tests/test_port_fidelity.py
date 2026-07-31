@@ -9,23 +9,38 @@ of the port. This test exists to catch a retyped digit, not to specify physics. 
 hardware is genuinely recalibrated, update the config and these numbers together.
 """
 from ecowhen_power_system import config_default as config
+from ecowhen_power_system.specifications import SPECS_BATTERY_CELL
 
 
-def test_cable_correction_constants_match_the_installation():
-    assert config.measurement_components == {
-        "mppt150": {"connector_R0": 0.011, "voltage_offset": -0.1},
-        "mppt100": {"connector_R0": 0.015, "voltage_offset": -0.1},
-        "multiplus": {"connector_R0": 0.0035, "voltage_offset": -0.16},
+def test_clamp_derivation_constants_match_the_installation():
+    """The cables between each source and the battery clamps."""
+    assert config.battery.indirect_voltage_measurements == {
+        "mppt150": {"variable": "DC_0_voltage",
+                    "connector_R0": 0.011, "voltage_offset": -0.1},
+        "mppt100": {"variable": "DC_0_voltage",
+                    "connector_R0": 0.015, "voltage_offset": -0.1},
+        "multiplus": {"variable": "DC_0_voltage",
+                      "connector_R0": 0.0035, "voltage_offset": -0.16},
+    }
+    assert config.battery.indirect_current_measurements == {
+        "mppt150": {"variable": "DC_0_current"},
+        "mppt100": {"variable": "DC_0_current"},
+        "multiplus": {"variable": "DC_0_current"},
     }
 
 
 def test_battery_model_constants_match_the_installation():
     batt = config.battery
-    assert batt.Q_tot == 210      # Ah
+    assert batt.Q_tot == 310      # Ah
     assert batt.n_cells == 8
     assert batt.model_parameter.R0 == 0.01        # ohm
     assert batt.model_parameter.R1 == 0.04        # ohm
     assert batt.model_parameter.C1 == 2000        # farad
+    # The per-cell OCV curve the SOC estimate is inverted out of. battery.py used to
+    # declare two of these and silently keep the second; this is that one.
+    assert SPECS_BATTERY_CELL["lifepo4"]["ocv_curve"] == [
+        2.5, 3.0, 3.19, 3.22, 3.25, 3.26, 3.27, 3.3, 3.32, 3.35, 3.5,
+    ]
 
 
 def test_expected_components_are_configured():

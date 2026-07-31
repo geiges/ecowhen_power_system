@@ -150,36 +150,46 @@ def build_actuator_registry(psystem, components_status, aux_by_name, actuators_c
     return registry
 
 
-def check_voltage_calibration(psystem, variables_to_log) -> None:
-    """Every component feeding the battery-voltage average must be calibrated.
+def check_voltage_calibration(variables_to_log, battery) -> None:
+    """Every component that can see the battery clamps must declare its cable.
 
-    The estimator averages each component's `DC_0_voltage` after correcting it for
-    cable drop, so an uncalibrated contributor either corrupts the average silently
-    or — as the code actually behaves — raises `Connector resisitance not set` from
-    `voltage_measurement()` on *every* poll, killing SOC estimation for good.
+    The clamp voltage is derived per source — terminal voltage minus the drop the
+    source's own current causes — and the estimates are averaged. A component on the
+    bus reporting `DC_0_voltage` that the battery does not declare is therefore a
+    source silently dropped from that average; used blind instead, it would
+    contribute a cable drop nobody measured.
 
-    Raising the alarm here converts that into one clear failure at startup. It fires
-    only for components genuinely on the bus: `phoenix` is configured but has never
-    been present, and an absent component contributes no variables to correct.
+    It fires only for components genuinely on the bus: `phoenix` is configured but
+    has never been present, and an absent component reports no variables.
 
-    Deliberately not "fall back to the raw voltage": a wrong battery voltage feeds the
-    Kalman filter and the SOC drifts plausibly, which is far worse than a loud stop.
-    The fix for a real Phoenix is to *measure* its cable and add it to
-    `config_default.measurement_components` — not to guess a number here.
+    Deliberately not "assume zero resistance": a wrong clamp voltage feeds the Kalman
+    filter and the SOC drifts plausibly, which is far worse than a loud stop. The fix
+    for a real Phoenix is to *measure* its cable and add it to
+    `config_default.battery.init_derrived_measurements` — not to guess a number here.
     """
-    uncalibrated = sorted({
+    on_bus = {
         var.split("/")[0] for var in variables_to_log
-        if var.endswith("DC_0_voltage")
-        and not var.startswith("system")
-        and getattr(psystem[var.split("/")[0]], "connector_R0", None) is None
-    })
+        if var.endswith("DC_0_voltage") and not var.startswith("system")
+    }
+    declared = set(battery.indirect_voltage_measurements)
+
+    uncalibrated = sorted(on_bus - declared)
     if uncalibrated:
         raise ValueError(
             f"on the bus but not calibrated: {', '.join(uncalibrated)}. "
-            f"These contribute DC_0_voltage to the battery-voltage average, so they "
-            f"need a connector_R0/voltage_offset entry in "
-            f"config_default.measurement_components. Measure the cable — do not guess."
+            f"These can see the battery clamps, so each needs a "
+            f"connector_R0/voltage_offset entry in "
+            f"config_default.battery.init_derrived_measurements. "
+            f"Measure the cable — do not guess."
         )
+
+    # The other direction is not fatal — the average simply loses a source — but it
+    # is exactly the A11 failure that used to happen in silence, so it gets said out
+    # loud once, at startup.
+    absent = sorted(declared - on_bus)
+    if absent:
+        print(f"[discovery] declared voltage sources not reporting: "
+              f"{', '.join(absent)} — the battery voltage will be derived without them")
 
 
 def startup_sequence(bus, psystem) -> None:
@@ -206,17 +216,14 @@ def discover(bus, config):
     """Walk the bus and build the whole topology contract as a plain dict."""
     from . import power_system
 
-    psystem = power_system.init_power_system(
-        system_components=config.system_components,
-        measurement_components=config.measurement_components,
-    )
+    psystem = power_system.Power_system(config.system_components)
 
     startup_sequence(bus, psystem)
 
     variables_to_log, _ = psystem.get_variables_to_log(bus)
     states_to_log, _ = psystem.get_states_to_log(bus)
 
-    check_voltage_calibration(psystem, variables_to_log)
+    check_voltage_calibration(variables_to_log, config.battery)
 
     components_status = {}
     for short_name, component in psystem.items():

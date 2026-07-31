@@ -1,8 +1,9 @@
 # Refactor: `ecowhen_power_system` — greenfield 4-process rebuild
 
-> **Status:** Phase 1 in progress. Implementation paused for plan review.
+> **Status:** Phase 1 complete, with the A12–A15 revisions applied on top. Phase 2 not started.
 > See [Implementation status](#implementation-status) at the bottom for exactly where
-> it stopped and what to pick up first.
+> it stopped and what to pick up first. **Amendments A1–A15 change the plan below** — read them
+> alongside it; A12 in particular supersedes the measurement handling described in Phase 1.
 
 ## Context
 
@@ -91,16 +92,17 @@ By contrast `../ecowhen_data_api`: **37 passed, 0 failed.** It is a trustworthy 
     ┌──────────────────────────────────────────────────┐
     │ ① POWER SYSTEM              the system model     │
     │   • discover topology + calibration              │
-    │   • poll D-Bus + aux → correct → simulate SOC    │
+    │   • poll D-Bus + aux → derive battery → sim SOC  │
     │   • persists own soc_state.json (durable)        │
     └──────────────────────────────────────────────────┘
               │                              │
    system_configuration.yaml             state.json
    ── TOPOLOGY CONTRACT ──              ── STATE CONTRACT ──
-   poll map + ACTUATOR REGISTRY:        live values, SOC_Kf, SOC_counted,
-   name → transport + address           time_to_low_battery,
-        + on/off values                 soc_above_threshold_since,
-   (Tasmota URL declared ONCE)          aux power keys, ISO timestamp
+   poll map + ACTUATOR REGISTRY:        raw values, battery/voltage+current
+   name → transport + address           (derived, A12), SOC_Kf, SOC_counted,
+        + on/off values                 time_to_low_battery,
+   (Tasmota URL declared ONCE)          soc_above_threshold_since,
+                                        aux power keys, ISO timestamp
               │                        ┌────┴────┐
               ▼                        ▼         ▼
    ┌────────────────────────┐   ┌─────────────────────┐
@@ -145,7 +147,8 @@ D-Bus vars/states **+ aux HTTP** → calibrate → simulate → `state.json`. Du
 **Harvest verbatim** — physics/numerics, hard to rewrite, no test coverage to catch silent drift:
 `battery.py`, `kalman.py`, `simulation.py`, `utils.py`, `components.py`, `aux_components.py`,
 `power_system.py`, `config_default.py`. (`components.py` has since been split by manufacturer and
-extended — see A10.)
+extended — see A10. `battery.py` + `simulation.py` are now one `battery_simulation.py`, and the
+measurement correction became a derivation — see **A12**.)
 
 **Plus a startup sequence** — the Multiplus must be run once before its DC measurements exist, or the
 battery voltage is silently averaged without it. See A11.
@@ -302,6 +305,9 @@ voltage = raw_voltage_value - (self.connector_R0 * current) + self.voltage_offse
 consumed at `simulation.py:170`. **Not harvested.** If `test_init_soc_est.py` matters, it stays in the
 old repo.
 
+> Superseded by **A12**: every symbol named in that snippet is now deleted. The conclusion stands and
+> got stronger — the duplicated "correction" was the wrong model in *both* copies.
+
 ### A2 — the `from config import *` override hook is dropped
 
 `config_default.py` ended with:
@@ -354,6 +360,11 @@ far worse than a loud stop. The fix for a real Phoenix is to measure its cable, 
 
 The default test bus mirrors reality (phoenix absent); `phoenix_service()` in `conftest.py` adds it
 for the test that proves the guard fires.
+
+> Amended by **A12**: the guard, its message and its reasoning are unchanged, but it now checks the
+> bus against the battery's declared derivation sources — `measurement_components` and
+> `voltage_measurement()` no longer exist. It also warns (not raises) when a declared source stops
+> reporting, which is the A11 case below.
 
 ### A6 — `kalman.py` uses `np.matrix`; left alone deliberately
 
@@ -443,6 +454,10 @@ raises, the exception is caught), and `simulation.update` averages the battery v
 alone. A wrong-but-plausible battery voltage feeds the Kalman filter — the exact failure mode A5
 exists to prevent, arriving by a different door.
 
+> **A12** adds a second, cheaper line of defence for the same failure: startup now names any declared
+> voltage source that is not reporting. The startup sequence below is still what *fixes* it; the
+> warning is what makes it visible when the sequence does not work.
+
 **Phase 1 therefore gained a startup sequence**, `discovery.startup_sequence()`, run before the poll
 maps are built so a woken device is discovered in the same pass:
 
@@ -483,14 +498,173 @@ and strictly better than `HEAD`. Recorded so nobody later wonders why the copy �
 Also uncommitted there and relevant to **Phase 4**: `tests/test_wallbox_optimal_charge.py` (−17 lines),
 and `REFACTOR_PLAN.md` itself was never committed.
 
+### A12 — the battery is one object, and its clamp values are derived, not corrected
+
+Applied 2026-07-31, after Phase 1 and before Phase 2. Two changes, requested together because
+they touch the same code. **Supersedes the parts of A1, A5 and A11 that name deleted code**, and
+supersedes the "correct" step in the architecture diagram and the Phase 1 harvest list.
+
+**1. `battery.py` + `simulation.py` → `battery_simulation.py`.** `System_Simulation` was a battery
+simulation wrapping a `Battery` it was the sole user of; the Thevenin model, the coulomb counter and
+the Kalman filter all describe the same battery and were separated only by file. Now one class,
+`Battery_Simulation`, which passes `self` to `ExtendedKalmanFilter` (which only ever needed `R1`,
+`C1`, `total_capacity`, `OCV_model`).
+
+Two things fell out of the merge:
+- **`Battery._RC_voltage` and `Battery.voltage` deleted.** The EKF already owns the RC state
+  (`x[1,0]`), and the counting copy was both dead and *unstable*: `simulation.py:182` called
+  `update(-time_delta, …)`, so `exp(-Δt/τ)` evaluated as `exp(+Δt/τ)` and that voltage diverged
+  geometrically. Nothing on the live path read it, which is why it survived. The negative-`time_delta`
+  hack went with it — counting now takes positive seconds and charge-positive current.
+- **The per-cell OCV curve moved to `specifications.py`** (`SPECS_BATTERY_CELL["lifepo4"]["ocv_curve"]`).
+  It is a chemistry property and `cell_type` was already the key there. `battery.py` declared two of
+  these lists back to back, the first silently dead — that ambiguity had to be resolved to merge at
+  all, so it is now pinned by `test_port_fidelity`.
+
+**Verified as a numerical no-op.** The pre-merge `System_Simulation` was extracted from `HEAD` and run
+beside the new class for 200 polls over a charge/discharge swing. Worst absolute difference:
+**0.000e+00** on derived voltage, derived current, `SOC_Kf`, `SOC_counted` and `time_to_low_battery`.
+The one deliberate behaviour change is inert at present calibration: charge efficiency now applies
+only while charging (a 1 A discharge really does remove 1 A), and it is configured at 1.0.
+
+**2. "Measurement correction" was the wrong model.** The old code took each component's `DC_0_voltage`,
+"corrected" it via `VictronBaseComponent.voltage_measurement()`, and averaged the results. But no
+component's reading is wrong, and its error is unknown and uninteresting. What is actually happening is
+the *derivation of a quantity nobody measures*: there is no shunt at the battery clamps and no BMS on
+the bus, so the clamp voltage is inferred from each source's terminal voltage less the drop its own
+current causes:
+
+```
+V_clamp = V_source + offset_source - R_source * I_source
+```
+
+Identical arithmetic, honest name — and it relocates the constants. `connector_R0`/`voltage_offset`
+describe the **cable between a source and the clamps**, not the source, so they are declared on the
+battery (`Generic_Battery.init_derrived_measurements`, called from `config_default`) instead of being
+installed onto each component. Consequences:
+
+- **Deleted:** `VictronBaseComponent.init_measurement_correction` and `voltage_measurement`,
+  `config_default.measurement_components`, and `power_system.init_power_system` — which, once it no
+  longer installed calibration, was a one-line wrapper around `Power_system(config.system_components)`.
+- **`state.json` gains three keys and loses none:** `battery/voltage`, `battery/current`,
+  `battery/voltage_spread`. Per-component "corrected" values are gone; every `mppt*/DC_0_voltage` and
+  `system/battery_*` key now carries **exactly what the bus said**. The simulator used to overwrite
+  `system/battery_voltage` with its own result, so a measurement and an estimate were indistinguishable
+  in the contract — they no longer are. **Phase 3/4 note:** anything that read `system/battery_voltage`
+  expecting the corrected number must read `battery/voltage`.
+- **`battery/voltage_spread`** (max − min across the per-source estimates) is the one diagnostic kept.
+  Sources agreeing to a few mV are right about the clamps; a widening spread is a drifting cable or a
+  stale constant, and nothing else in the system would ever report it.
+- **Battery current is unchanged**: still the GX aggregate less each source's idle draw. The GX already
+  sums the DC sources, and `const_consumption` remains a property of the device, so it stays on the
+  component.
+- **A5's guard survives with a new source of truth.** `check_voltage_calibration` no longer reaches
+  into a component for `connector_R0`; it compares the components on the bus reporting `DC_0_voltage`
+  against the battery's declared sources. Same failure, same message, same reason not to guess a
+  number. It now *also* warns when a **declared** source is not reporting — which is the A11 failure
+  mode, previously silent.
+
+### A13 — the Kalman filter's current sign was inverted (found by A12, **fixed**)
+
+`kalman.py:94` builds `B = [[-Δt/capacity], [R1(1-exp_coeff)]]`, which expects **discharge-positive**
+current. It is fed **charge-positive** current — Victron's convention, and the coulomb counter's. The
+same +30 A charging input for one hour:
+
+```
+EKF predict step : SOC 0.5 → 0.4032   (and RC state +1.20 V, wrong sign against Hx = OCV − x[1])
+coulomb counting : SOC 0.5 → 0.5968
+```
+
+Exactly mirrored. The measurement update then drags the estimate back toward the OCV-implied SOC every
+step, which is why the output looks plausible and why this survived the port: the prediction is fighting
+the measurement rather than informing it. It matters because `SOC_Kf` is what rails the *counted* SOC
+to 0.0/1.0 near the ends of the battery.
+
+**Pre-existing** — identical in `victron_system_monitor`, so every SOC estimate this installation has
+ever produced was made with the prediction step inverted.
+
+**The fix, and why it needed evidence.** Negating `u` at the two call sites also moves the noise gate at
+`kalman.py:104` (`if u>10 or u<-3`), which is asymmetric and therefore means a different thing under
+each convention — "inflate the measurement noise when charging above 10 A or discharging above 3 A"
+becomes "…discharging above 10 A or charging above 3 A". That is a calibration question, not a refactor
+decision, so it was settled against 37 days of the predecessor's recorded `sim_*.csv` (2026-06-01 →
+07-07, 538 603 rows, currents −101 A … +79 A) rather than by argument. Three variants, capacity 210 Ah
+as recorded:
+
+| variant | anchor RMSE | innov mean | innov RMS | d(innov)/dI | Kf−count RMSE |
+|---|---|---|---|---|---|
+| A  as-is | 0.0150 | **−0.08660** | 0.78889 | +0.04016 | 0.1386 |
+| B  sign fixed, gate follows | 0.0154 | **+0.00266** | 0.60399 | −0.03093 | **0.1233** |
+| C  sign fixed, gate meaning preserved | 0.0157 | +0.02180 | 0.60331 | −0.03088 | 0.1240 |
+
+**B, applied.** Mean innovation — the standard test that a filter is consistent with its own
+measurements — falls **32×**, from −87 mV to +2.7 mV (10×, −92 mV → −9.1 mV, at 310 Ah). Innovation RMS
+drops 23 % at both capacities, and the filter and the coulomb counter move 11 % closer together. That
+margin is the sign bug and it is not close.
+
+B over C is much finer: B has the smaller mean innovation at both capacities but by 8× at 210 Ah and
+only 1.2× at 310 Ah, with innovation RMS a wash. B is taken on that consistent-but-narrow edge plus
+being the smaller change — the gate follows the sign rather than having its thresholds restated. **C is
+not ruled out by this data**; revisit it if the gate is ever re-tuned, alongside A15.
+The implementation names the convention at the call site (`discharge_positive = -current`) instead of
+burying a minus sign, and `test_the_filter_is_fed_discharge_positive_current` pins the handoff, because
+nothing about the output looks wrong when it regresses.
+
+**The anchor RMSE column is not evidence and must not be read as such.** Anchors are rest points, where
+the prediction contributes almost nothing and every variant relaxes to the OCV-implied SOC — which is
+exactly how the anchor itself is computed. All three land within 0.0007 of each other. The metric is
+near-circular by construction; it is in the table to be discounted, not to be weighed.
+
+**What the same replay says about the model** (see A15): the residual `d(innov)/dI` is still −0.031 Ω
+after the fix, so the model still over-predicts how far the voltage moves with current.
+
+### A14 — the recorded data measures the pack at ~285 Ah, not 210
+
+Same replay, independent of the filter. Between two genuine rest points the SOC change is known by
+inverting the OCV curve at each end, and the charge that moved is ∫I dt, so their ratio is a *measured*
+capacity. 58 clean anchors over the 37 days, 27 pairs swinging more than 10 % SOC:
+
+```
+implied capacity   pooled 288 Ah   median 280 Ah   IQR 247-313 Ah   n=27
+```
+
+`config_default` said **210 Ah** for the whole of the recorded period, so coulomb counting was
+overstating every SOC swing by roughly a third. That is a large part of why `SOC_Kf` and `SOC_counted`
+sit ~12 points apart in these logs. The working-tree change to **310 Ah** moves decisively toward the
+measurement and is supported by it; 288 would be better still, but the difference is inside the spread.
+
+Two caveats. LiFePO4's mid-range OCV curve is flat — at 50 % SOC one percentage point of SOC is 15.6 mV,
+so 10 mV of noise is ±0.6 % SOC per anchor and short swings divide two noisy anchors by each other. The
+pooled figure weights by swing size and is the one to trust. And this is an *effective* capacity at
+these temperatures and rates, not a nameplate.
+
+**A trap found while building this, worth keeping:** low current alone does not mean "at rest". During
+absorption the charger holds the pack at 28.3 V while the current tapers below 1 A — above the top of
+the OCV curve, where the inversion clamps to 100 % and produces nonsense (one such pair implied 97 Ah).
+Anchors are only valid when the voltage lands strictly inside the curve's invertible range.
+
+### A15 — R1 is roughly 4× too large (open, not acted on)
+
+The innovation's slope against current is the resistance the model still owes after its own R0 and RC
+terms are removed. Post-fix it is **−0.031 Ω**, i.e. the model moves the predicted voltage far more per
+amp than the pack actually does. Solving the two variants' slopes for the pack's effective resistance
+gives ≈0.010–0.019 Ω against the model's `R0 + R1 = 0.05 Ω`.
+
+So the RC branch is oversized by something like 3–4×, and it is the dominant remaining error — larger
+than the sign bug was on the innovation RMS. **Not acted on:** unlike the sign, this is genuine
+calibration with no correct answer derivable from first principles, and re-tuning `R1`/`C1` (and
+plausibly `R_var`, which at 0.5 V² assumes far more voltage noise than the data shows) is a fitting
+exercise on its own. The replay harness in `tools/replay.py` is what such a fit should be scored
+with. Worth doing before Phase 4 leans on this model, but it is not a refactor task.
+
 ---
 
 # Implementation status
 
-**Phase 1 complete.** 55 tests, green, no warnings. Paused for code review before Phase 2.
+**Phase 1 complete**, plus the A12/A13 revisions applied on 2026-07-31. 59 tests, green, no warnings.
 
 ```
-uv run python -m pytest tests/      # 55 passed
+uv run python -m pytest tests/      # 59 passed
 ```
 
 ## What Phase 1 delivered
@@ -501,17 +675,18 @@ uv run python -m pytest tests/      # 55 passed
 |---|---|
 | `paths.py` | `RUNTIME_DIR` (ephemeral) vs `DATA_DIR` (durable), both env-overridable |
 | `discovery.py` | startup sequence (A11) → bus walk → topology contract, incl. the resolved actuator registry + the calibration guard (A5) |
-| `poll.py` | D-Bus + aux → correct → estimate SOC → state contract; `SocTracker`; durable SOC persistence |
+| `poll.py` | D-Bus + aux → estimator → state contract; `SocTracker`; durable SOC persistence. Publishes raw readings verbatim (A12) |
+| `battery_simulation.py` | the battery: Thevenin model, clamp-value derivation, coulomb counting, EKF — one class (A12) |
 | `power_system_main.py` | the process: `setup()` once, then poll; `--once` for a single shot |
-| `components.py` + `manufacturer/victron.py` + `specifications.py` | component layer split by manufacturer; `hardware = None` for non-bus components (A10) |
-| `config_default.py` | gained the `actuators` declaration (A8, A9) and the three DS18B20 sensors (A10) |
+| `components.py` + `manufacturer/victron.py` + `specifications.py` | component layer split by manufacturer; `hardware = None` for non-bus components (A10); cell OCV curve (A12) |
+| `config_default.py` | gained the `actuators` declaration (A8, A9), the three DS18B20 sensors (A10), and the battery's derivation declaration in place of `measurement_components` (A12) |
 
 **The Coordinator spike** — `control/{service,mode,coordinator}.py`, validated by
 `test_coordinator.py` (18 tests, fakes only, no hardware). Found two real design faults before
 anything depended on them; see A7.
 
-**Tests** — 55 across `test_port_fidelity` (calibration pinned), `test_discovery`, `test_poll`,
-`test_power_system_integration` (the *real* Battery/Kalman/System_Simulation), `test_coordinator`.
+**Tests** — 59 across `test_port_fidelity` (calibration pinned), `test_discovery`, `test_poll`,
+`test_power_system_integration` (the *real* `Battery_Simulation` + Kalman filter), `test_coordinator`.
 `conftest.py` carries the `fake_bus` seam (A3) and builds shared objects through factories, which is
 the fix for the rot that put the predecessor's suite 75-red. The fake bus now also **writes**
 (`SetValue` writes through and answers `0`), which is what lets the startup sequence — and, in
@@ -526,6 +701,10 @@ Phase 2, the Gateway's actuation — be tested off-device.
    - **0 keys missing.** All 28 live keys present; the new contract is a strict superset.
    - **+7 added**, every one intended: 4 aux keys (`wallbox/*`, `ac_inverter/*` — decision #4),
      `timestamp` (the ISO fix), `soc_above_threshold_since` + `minutes_at_full_soc` (decision #7).
+   - **A12 then added 3 more** (`battery/voltage`, `battery/current`, `battery/voltage_spread`) and
+     changed the *meaning* of `system/battery_voltage` and every `mppt*/DC_0_voltage` back to the raw
+     reading. The key-level differential above therefore no longer covers those; re-run it against the
+     device with A12's mapping in mind.
 3. **Actuator registry resolves**: `multiplus_mode`, `mppt100_load`, `wallbox_charge`,
    `ac_inverter_plug` — with `multiplus_mode.write` = `{dbus, com.victronenergy.vebus.ttyUSB2,
    /Mode, on: 3, off: 4}`, derived from the component mapping, not restated.
@@ -548,6 +727,13 @@ Per the plan above, plus what Phase 1 learned:
 
 ## Carried risks
 
+- **`R1` is ~4x too large (A15).** Open. The dominant remaining model error now that A13 is fixed, and
+  worth a calibration pass against `tools/replay.py` before Phase 4 leans on this model.
+- **Capacity is configured at 310 Ah; the data measures ~288 Ah (A14).** Much better than the 210 Ah it
+  replaced, but still the largest single lever on coulomb-counting accuracy.
+- **A12 changed the state contract's meaning, not just its keys.** `system/battery_voltage` and the
+  per-component `DC_0_voltage` keys are now raw readings; the derived clamp values live under
+  `battery/*`. Nothing consumes them yet — Phase 3 and 4 must not carry over the old assumption.
 - **Three of the four `ecops-*` entrypoints still point at modules that do not exist**
   (`gateway_main.py`, `logger_main.py`, `control_main.py`). `uv sync` does not validate script
   targets, so this stays latent until someone runs one. Phases 2–4 each create one.
@@ -555,9 +741,9 @@ Per the plan above, plus what Phase 1 learned:
 - **`running_since` changed format**, from `"26-07-07 00:29"` to ISO. Same key, so the key-level
   differential did not flag it. Nothing was found reading it, but Phase 3/4 should confirm.
 - **The differential compares key names, not values.** See above — real validation needs the device.
-- **`phoenix` will now fail startup if it is ever plugged in** (A5). That is intended, and the error
-  says what to do, but it is a behaviour change from the predecessor, which would instead have
-  crashed on every poll.
+- **`phoenix` will now fail startup if it is ever plugged in** (A5, retargeted by A12). That is
+  intended, and the error says which cable to measure, but it is a behaviour change from the
+  predecessor, which would instead have crashed on every poll.
 - **The startup sequence has only been exercised against the fake bus** (A11). The 5 s / 10 s waits
   are a guess at how long a real Multiplus takes to bring its DC measurement hardware up; they are
   class attributes on `VictronMultiplusII` so they can be tuned on the device without touching logic.

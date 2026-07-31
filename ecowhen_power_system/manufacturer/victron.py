@@ -171,40 +171,13 @@ class VictronBaseComponent(DBusComponent):
         self.PV_system = dict(lon=lon, lat=lat, azimuth=azimuth, tilt=tilt,
                               PV_peak=PV_peak, P_limit=P_limit)
 
-    
-    
-    def init_measurement_correction(self, connector_R0, voltage_offset):
-        """
-        Set connector resistance of cable connection and voltage offset in order
-        to process raw voltage measurements.
-        """
-        self.connector_R0 = connector_R0
-        self.voltage_offset = voltage_offset
-        
-    def voltage_measurement(self, raw_voltage_value, current):
-        """
-        Process raw voltage measurement from component. Processing does consider
-        the voltage drop/rise due to cable resistance for current flow and can
-        consider and additive offset.
+    # A component reports what it sees at its own terminals and nothing more. It used
+    # to carry a connector_R0/voltage_offset pair and a voltage_measurement() that
+    # "corrected" its reading — but the reading is not wrong, and its error is
+    # unknown. Those constants describe the cable between this component and the
+    # battery clamps, so they now live on the battery, which is the thing being
+    # derived: see Generic_Battery.init_derrived_measurements.
 
-        Parameters
-        ----------
-        raw_voltage_value : float
-            
-        current : float
-            
-
-        Returns
-        -------
-        voltage : float
-
-        """
-        if self.connector_R0 is None:
-            raise(Exception('Connector resisitance not set'))
-        else:
-             voltage = raw_voltage_value - (self.connector_R0 * current) + self.voltage_offset
-        return voltage
-            
 
 class VictronSystem(VictronBaseComponent):
     """
@@ -244,7 +217,6 @@ class VictronSolarMPPT(VictronBaseComponent):
          
         component_type = 'com.victronenergy.solarcharger'
         super().__init__(product_name, short_name, component_type, const_consumption) 
-        self.connector_R0 = None
         
         if connected_PV is not None:
             self.init_connected_PV(**connected_PV)
@@ -273,7 +245,6 @@ class VictronSolarMPPTWithDCLoad(VictronBaseComponent):
          
         component_type = 'com.victronenergy.solarcharger'
         super().__init__(product_name, short_name, component_type, const_consumption)
-        self.connector_R0 = None
 
 class VictronMultiplusII(VictronBaseComponent):
     """
@@ -298,7 +269,6 @@ class VictronMultiplusII(VictronBaseComponent):
 
         component_type ='com.victronenergy.vebus'
         super().__init__(product_name, short_name, component_type, const_consumption) 
-        self.connector_R0 = None
         
         if connected_PV is not None:
             self.init_connected_PV(**connected_PV)
@@ -434,7 +404,6 @@ class VictronPhoenix24_800(VictronBaseComponent):
 
         component_type ='com.victronenergy.inverter'
         super().__init__(product_name, short_name, component_type, const_consumption) 
-        self.connector_R0 = None
         
 
 class VictronBatteryMonitor(VictronBaseComponent):

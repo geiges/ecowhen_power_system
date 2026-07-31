@@ -94,19 +94,9 @@ class Power_system(dict):
                 
         if len(missing_components)> 0:
             print(f'The following components are unresponsive: {missing_components}')
-            
-        return states_to_log, missing_components
-            
-def init_power_system(system_components,
-                      measurement_components):
-    """
-    Return the power system instance including all initialised components and 
-    available measurements components.
-    """
-    
-    power_system = Power_system(system_components)
 
-    for component, measurement_setup in measurement_components.items():
-        power_system[component].init_measurement_correction(**measurement_setup)
-    
-    return power_system
+        return states_to_log, missing_components
+
+# init_power_system() is gone with the measurement corrections it used to install on
+# each component — the cable constants now belong to the battery, so constructing the
+# system is just Power_system(config.system_components).

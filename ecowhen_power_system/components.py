@@ -70,6 +70,10 @@ class Generic_Battery(object):
         spec = SPECS_BATTERY_CELL[cell_type]
         self.short_name = short_name
         self.cell_type = cell_type
+        # Nothing is derived until init_derrived_measurements() says how. An empty
+        # declaration is caught at startup by discovery.check_voltage_calibration.
+        self.indirect_voltage_measurements = {}
+        self.indirect_current_measurements = {}
         self.charge_efficiency = charge_efficiency
         self.Q_tot = capacity_ah
         self.n_cells = n_cells
@@ -99,7 +103,28 @@ class Generic_Battery(object):
             
         self.model_parameter = ModelParameter(R0, R1, C1, R_var, Q_soc,Q_rc)
 
-    def init_derrived_measurements(self, indirect_voltage_measurements, indirect_current_measurements):
-       pass
-        
-   
+    def init_derrived_measurements(self,
+                                   indirect_voltage_measurements,
+                                   indirect_current_measurements):
+        """Declare how the battery's own voltage and current are derived.
+
+        Neither is measured: no sensor sits at the clamps. Each entry names a
+        component that sees them indirectly, the variable it reports, and — for
+        voltage — the cable in between: `connector_R0` is the drop that the source's
+        own current causes, `voltage_offset` the residual difference.
+
+        These describe the *path* from a source to the clamps, not the source, which
+        is why they are declared here and not on the component. A voltage source
+        needs a current source to go with it, or its cable drop is unknowable.
+        """
+        missing_current = (
+            set(indirect_voltage_measurements) - set(indirect_current_measurements)
+        )
+        if missing_current:
+            raise ValueError(
+                f"{self.short_name}: {sorted(missing_current)} declare an indirect "
+                f"voltage but no indirect current, so the cable drop between them "
+                f"and the clamps cannot be derived"
+            )
+        self.indirect_voltage_measurements = indirect_voltage_measurements
+        self.indirect_current_measurements = indirect_current_measurements

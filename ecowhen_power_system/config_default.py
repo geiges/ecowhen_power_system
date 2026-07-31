@@ -38,12 +38,12 @@ PV_componentes = {
     }
     
     
-# 8-cell LiFePo4 battery, 210Ah. Not a D-Bus device, so it is kept out of
+# 8-cell LiFePo4 battery, 310Ah. Not a D-Bus device, so it is kept out of
 # system_components (the discovery list); it feeds the battery simulation.
 battery = components.Generic_Battery("battery",
                            cell_type='lifepo4',
                            n_cells=8,
-                           capacity_ah=210, 
+                           capacity_ah=310, 
                            SOC_low = 0.2)
 
 # Battery simulation / Kalman-filter tuning. Physical battery parameters
@@ -54,6 +54,11 @@ battery.init_simulation_model(R0=0.01,
                               Q_soc = 1e-6,     # process noise for SOC state
                               Q_rc  = 1e-6,     # process noise for RC voltage state
                               )
+# Voltage and current at the battery clamps are not measured by anything — these
+# declare how they are derived. connector_R0 is the resistance of the cable between
+# that component and the clamps, voltage_offset the residual difference: *physical
+# measurements of this installation*, pinned by test_port_fidelity. Measure them,
+# never guess them.
 battery.init_derrived_measurements(
     indirect_voltage_measurements = {
         "mppt150": {
@@ -113,19 +118,6 @@ system_components = [
                                         short_name = 'DS18B20_inside', 
                                         ),
     ]
-
-# system connectors (relevant for measurements)
-measurement_components = {
-    "mppt150": {
-        'connector_R0' :  0.011,
-        'voltage_offset' :  -0.1},
-    "mppt100": {
-        'connector_R0' :  0.015,
-        'voltage_offset' :  -0.1},
-    "multiplus": {
-        'connector_R0' :  0.0035,
-        'voltage_offset' :  -0.16},
-    }
 
 from . import aux_components as aux_comp
 

@@ -55,10 +55,9 @@ def test_discovers_every_configured_component(system_config):
 
 
 def test_uncalibrated_voltage_component_on_the_bus_fails_at_startup(bus_values):
-    """If the Phoenix were ever plugged in, it would contribute DC_0_voltage to the
-    battery-voltage average with no connector_R0 — and voltage_measurement() would
-    raise on every single poll, killing SOC estimation. Fail once, at startup,
-    instead.
+    """If the Phoenix were ever plugged in it could see the battery clamps, but with
+    no cable declared for it the estimator would silently drop it from the average.
+    Fail once, at startup, instead — and say which cable needs measuring.
     """
     service, values = phoenix_service()
     bus_values[service] = values
@@ -200,7 +199,7 @@ def test_state_without_on_off_labels_cannot_back_an_actuator(fake_bus):
 
     class Cfg:
         system_components = config_default.system_components
-        measurement_components = config_default.measurement_components
+        battery = config_default.battery
         aux_components = config_default.aux_components
         actuators = broken
 
@@ -219,7 +218,7 @@ def test_vedirect_write_value_must_be_allowed_by_the_register(fake_bus):
 
     class Cfg:
         system_components = config_default.system_components
-        measurement_components = config_default.measurement_components
+        battery = config_default.battery
         aux_components = config_default.aux_components
         actuators = broken
 

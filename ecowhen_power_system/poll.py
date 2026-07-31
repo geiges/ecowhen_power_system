@@ -1,8 +1,12 @@
 """Polling: turn a bus + the topology contract into the state contract.
 
-One pass reads D-Bus variables, D-Bus states and the aux HTTP devices, corrects the
-raw voltages for cable losses, runs the SOC estimator, and returns the dict that
-becomes `state.json`.
+One pass reads D-Bus variables, D-Bus states and the aux HTTP devices, derives the
+battery's own voltage and current from them, runs the SOC estimator, and returns the
+dict that becomes `state.json`.
+
+Every D-Bus value here is exactly what the bus said. The derived quantities — the
+ones nothing measures — arrive from the estimator under their own `battery/*` keys,
+so a raw reading and an estimate are never confused for one another.
 
 SOC is the reason estimation lives here rather than in the Logger or in Control:
 nothing reports it. It exists only as Kalman-filter output over voltage, current and

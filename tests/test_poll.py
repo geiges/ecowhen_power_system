@@ -19,9 +19,7 @@ def polled(fake_bus, system_config, monkeypatch):
             "wallbox/power_w": 0.0, "ac_inverter/power_w": 12.0,
         },
     )
-    psystem = power_system.init_power_system(
-        config_default.system_components, config_default.measurement_components
-    )
+    psystem = power_system.Power_system(config_default.system_components)
     t_now = datetime(2026, 7, 15, 12, 0, 0)
     state = poll.build_state(
         fake_bus, psystem, system_config, config_default,
