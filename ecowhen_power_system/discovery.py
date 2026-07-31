@@ -182,6 +182,26 @@ def check_voltage_calibration(psystem, variables_to_log) -> None:
         )
 
 
+def startup_sequence(bus, psystem) -> None:
+    """Bring the hardware into a state where its measurements can be read.
+
+    Runs once, before the poll maps are built, so a device woken here is discovered
+    in the same pass. Today only the Multiplus needs it (its DC measurement hardware
+    stays dead until the inverter has run once); a component that declares no
+    `ensure_measurements_available` is simply skipped — no base-class ceremony for
+    one implementation.
+
+    This is the *one* place the Power System writes D-Bus, against the "exactly one
+    writer" rule. It is deliberate and bounded: it happens at startup, before the
+    Gateway exists and before Control can command anything, and it restores the mode
+    it found. Nothing else in this process may write.
+    """
+    for component in psystem.values():
+        wake = getattr(component, "ensure_measurements_available", None)
+        if wake is not None:
+            wake(bus)
+
+
 def discover(bus, config):
     """Walk the bus and build the whole topology contract as a plain dict."""
     from . import power_system
@@ -190,6 +210,8 @@ def discover(bus, config):
         system_components=config.system_components,
         measurement_components=config.measurement_components,
     )
+
+    startup_sequence(bus, psystem)
 
     variables_to_log, _ = psystem.get_variables_to_log(bus)
     states_to_log, _ = psystem.get_states_to_log(bus)

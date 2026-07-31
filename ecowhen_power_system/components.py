@@ -5,6 +5,7 @@ Created on Thu Feb 12 17:04:18 2026
 
 @author: and
 """
+from dataclasses import dataclass
 
 from .specifications import SPECS_BATTERY_CELL
 from .manufacturer.victron import (VictronMultiplusII, VictronSolarMPPT, 
@@ -56,10 +57,6 @@ class Generic_Battery(object):
     min_safety_temperature : float  # in °C
     max_safety_temperature : float  # in °C
     max_safety_load_watt : float    # in Watt
-    R0 : float = None # optional
-    R1 : float = None # optional
-    C1 : float = None # optional
-    
     hardware = None
     
     def __init__(self,
@@ -67,6 +64,7 @@ class Generic_Battery(object):
                  cell_type,
                  n_cells,
                  capacity_ah, 
+                 SOC_low,
                  charge_efficiency=1.0):
         
         spec = SPECS_BATTERY_CELL[cell_type]
@@ -75,6 +73,7 @@ class Generic_Battery(object):
         self.charge_efficiency = charge_efficiency
         self.Q_tot = capacity_ah
         self.n_cells = n_cells
+        self.SOC_low = SOC_low
         self.nominal_voltage = spec['nominal_voltage'] * n_cells
         self.min_safety_voltage = spec['min_voltage'] * n_cells
         self.max_safety_voltage = spec['max_voltage'] * n_cells
@@ -82,11 +81,25 @@ class Generic_Battery(object):
         self.max_safety_temperature = spec['max_temp']
         self.max_safety_load_watt = spec['max_charge_rate'] * self.nominal_voltage * self.Q_tot
         
-    def init_equivalent_circuit_model(self,
-                                      R0,
-                                      R1,
-                                      C1):
-        self.R0 = R0
-        self.R1 = R1
-        self.C1 = C1
+    def init_simulation_model(self,
+                              R0,
+                              R1,
+                              C1, 
+                              R_var, 
+                              Q_soc,
+                              Q_rc):
+        @dataclass
+        class ModelParameter:
+            R0: float
+            R1: float
+            C1: float 
+            R_var: float # measurement noise variance (V²)
+            Q_soc: float # process noise for SOC state
+            Q_rc: float # process noise for RC voltage state
+            
+        self.model_parameter = ModelParameter(R0, R1, C1, R_var, Q_soc,Q_rc)
+
+    def init_derrived_measurements(self, indirect_voltage_measurements, indirect_current_measurements):
+       pass
         
+   

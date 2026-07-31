@@ -43,10 +43,42 @@ PV_componentes = {
 battery = components.Generic_Battery("battery",
                            cell_type='lifepo4',
                            n_cells=8,
-                           capacity_ah=210)
-battery.init_equivalent_circuit_model(R0=0.01,
-                                      R1=0.04,
-                                      C1=2000)
+                           capacity_ah=210, 
+                           SOC_low = 0.2)
+
+# Battery simulation / Kalman-filter tuning. Physical battery parameters
+battery.init_simulation_model(R0=0.01,
+                              R1=0.04,
+                              C1=2000,
+                              R_var =0.5**2,   # measurement noise variance (V²)
+                              Q_soc = 1e-6,     # process noise for SOC state
+                              Q_rc  = 1e-6,     # process noise for RC voltage state
+                              )
+battery.init_derrived_measurements(
+    indirect_voltage_measurements = {
+        "mppt150": {
+            'variable' : 'DC_0_voltage',
+            'connector_R0' :  0.011,
+            'voltage_offset' :  -0.1},
+        "mppt100": {
+            'variable' : 'DC_0_voltage',
+            'connector_R0' :  0.015,
+            'voltage_offset' :  -0.1},
+        "multiplus": {
+            'variable' : 'DC_0_voltage',
+            'connector_R0' :  0.0035,
+            'voltage_offset' :  -0.16},
+        },
+    indirect_current_measurements = 
+    {
+        "mppt150": {
+            'variable' : 'DC_0_current'},
+        "mppt100": {
+            'variable' : 'DC_0_current'},
+        "multiplus": {
+            'variable' : 'DC_0_current'},
+        },
+    )
 
 
 #system setup
@@ -70,7 +102,7 @@ system_components = [
     components.VictronPhoenix24_800('Phoenix Inverter 24V 800VA 230V', 
                                     short_name='phoenix',
                                     const_consumption=0.1
-                                    ),
+                                    ), # not currently available
     components.Generic_DS18B20_Temperature_Sensor(product_name='1Wire Sensor 28-000000c8e009', 
                                         short_name = 'DS18B20_DC_multiplus', 
                                         ),
@@ -94,16 +126,6 @@ measurement_components = {
         'connector_R0' :  0.0035,
         'voltage_offset' :  -0.16},
     }
-
-# Battery simulation / Kalman-filter tuning. Physical battery parameters
-# (Q_tot, R0, R1, C1, ncells, charge_efficiency) come from `battery` above.
-batt_config_V1 = {
-    "R_var" : 0.5**2,   # measurement noise variance (V²)
-    "Q_soc" : 1e-6,     # process noise for SOC state
-    "Q_rc"  : 1e-6,     # process noise for RC voltage state
-    "low_battery_SOC" : 0.2,
-    "version" : 'V1',
-}
 
 from . import aux_components as aux_comp
 

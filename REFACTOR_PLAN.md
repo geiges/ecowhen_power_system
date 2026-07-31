@@ -144,7 +144,11 @@ D-Bus vars/states **+ aux HTTP** → calibrate → simulate → `state.json`. Du
 
 **Harvest verbatim** — physics/numerics, hard to rewrite, no test coverage to catch silent drift:
 `battery.py`, `kalman.py`, `simulation.py`, `utils.py`, `components.py`, `aux_components.py`,
-`power_system.py`, `config_default.py`.
+`power_system.py`, `config_default.py`. (`components.py` has since been split by manufacturer and
+extended — see A10.)
+
+**Plus a startup sequence** — the Multiplus must be run once before its DC measurements exist, or the
+battery voltage is silently averaged without it. See A11.
 
 **`config_default.py` — copy the file, do not re-derive.** Cable resistances and voltage offsets are
 *physical measurements of this specific installation*. Retyping is silent corruption with no test to
@@ -406,6 +410,70 @@ the Multiplus already declares `{3: "on", 4: "off"}`, so `ActuatorsConfig.multip
 always a duplicate. A VE.Direct register carries no labels, which is why the fan is the one place
 on/off are declared per-actuator.
 
+### A10 — components split by manufacturer, and `hardware = None` means "not on the bus"
+
+`components.py` was the harvested single file. It is now a thin composition layer over
+`manufacturer/victron.py`, which holds `DBusComponent` (everything bus-related: `get_interface`,
+`is_avaiable_on_bus`, `get_device_variables/states`) and the Victron classes. The split is what makes
+non-Victron hardware expressible: `Generic_DS18B20_Temperature_Sensor` is a 1-Wire sensor bridged onto
+the Victron D-Bus by [VenusOS-TemperatureService](https://github.com/Rikkert-RS/VenusOS-TemperatureService)
+— it speaks `com.victronenergy.temperature` but is not a Victron product, so it inherits
+`DBusComponent`, not `VictronBaseComponent`. Three of them are configured (`DS18B20_DC_multiplus`,
+`DS18B20_shunt`, `DS18B20_inside`).
+
+`Generic_Battery` moved the other way: cell chemistry now comes from `specifications.py`
+(`SPECS_BATTERY_CELL`), so safety limits are derived from `n_cells × per-cell spec` rather than
+retyped per installation. It is a **member of `system_components`** but carries `hardware = None`,
+the sentinel for "this component is real but nothing on the bus reports it". Discovery and both
+`get_*_to_log()` skip those. That is what lets the battery sit in the system model — where the
+simulator can reach it by name — without ever being looked up on D-Bus.
+
+**Consequence for later phases:** anything iterating `psystem.values()` and touching the bus must
+skip `hardware is None`. Three places already do; a fourth that forgets will `AttributeError` on
+`get_interface`.
+
+### A11 — a Multiplus that has not run since boot has no measurement hardware
+
+Found by the predecessor the hard way: with the Multiplus switched off, `victron_system_monitor`
+could not derive the battery voltage. The device is **on the bus and fully discoverable** — only its
+`/Dc/0/Voltage` and `/Dc/0/Current` are invalid, and Victron reports "invalid" as an **empty array**,
+not an error and not `None`. So nothing fails loudly: the component is discovered as available, both
+variables enter the poll map, `poll.retrieve_data` then drops them silently on every poll (`round([])`
+raises, the exception is caught), and `simulation.update` averages the battery voltage over the MPPTs
+alone. A wrong-but-plausible battery voltage feeds the Kalman filter — the exact failure mode A5
+exists to prevent, arriving by a different door.
+
+**Phase 1 therefore gained a startup sequence**, `discovery.startup_sequence()`, run before the poll
+maps are built so a woken device is discovered in the same pass:
+
+- Duck-typed on `ensure_measurements_available(dbus)`. Only `VictronMultiplusII` implements it; no
+  base-class hook for one implementation.
+- The sequence: read `/Mode` → `manual_start()` → poll both DC paths every 0.5 s for 5 s → **retry
+  once** with a 10 s wait → restore the mode it found (`off` if `/Mode` was unreadable, the safe guess
+  — we only got there because the inverter was not running).
+- Failure is **not** fatal: it warns and startup continues. A Multiplus that is genuinely dead or
+  unplugged must not stop the system model from running. Contrast A5, which does raise, because an
+  uncalibrated component produces a *wrong* number rather than a missing one.
+- `manual_start` / `manual_stop` take `dbus` as an argument, like every other bus entry point in the
+  package, and derive `3`/`4` from the declared `inverter_mode` mapping — no restated integers (A9).
+
+**This is the one place the Power System writes D-Bus**, against decision #3. Deliberate and bounded:
+it runs at startup, before the Gateway process exists and before Control can command anything, and it
+restores what it found. Nothing else in the process may write. If a second component ever needs
+waking, it implements the same method — it does **not** get its own write path.
+
+Two D-Bus details worth keeping, both learned here:
+- `BusItem.SetValue` takes a **variant** and answers `0` on success / `-1` on refusal. On the device
+  the value must be wrapped (`GLib.Variant("i", …)`); `gi` is imported lazily inside the helper for
+  the same reason `power_system_main.get_bus()` imports pydbus lazily — the package must stay
+  importable off-device.
+- Reads that matter must **type-check** the result. `_read_number()` returns `None` for the empty
+  array, which is the only way to tell "invalid" from a real reading.
+
+**Cost, accepted:** waking a deliberately-stopped Multiplus energises AC output for a few seconds at
+every restart. That is the price of a correct battery voltage, and it happens only when the
+measurements are actually missing.
+
 ### A4 — the harvest source was a dirty tree
 
 `victron_system_monitor` has uncommitted changes. `components.py` was copied from the **working
@@ -419,10 +487,10 @@ and `REFACTOR_PLAN.md` itself was never committed.
 
 # Implementation status
 
-**Phase 1 complete.** 52 tests, green, no warnings. Paused for code review before Phase 2.
+**Phase 1 complete.** 55 tests, green, no warnings. Paused for code review before Phase 2.
 
 ```
-uv run python -m pytest tests/      # 52 passed
+uv run python -m pytest tests/      # 55 passed
 ```
 
 ## What Phase 1 delivered
@@ -432,19 +500,22 @@ uv run python -m pytest tests/      # 52 passed
 | File | Role |
 |---|---|
 | `paths.py` | `RUNTIME_DIR` (ephemeral) vs `DATA_DIR` (durable), both env-overridable |
-| `discovery.py` | bus walk → topology contract, incl. the resolved actuator registry + the calibration guard (A5) |
+| `discovery.py` | startup sequence (A11) → bus walk → topology contract, incl. the resolved actuator registry + the calibration guard (A5) |
 | `poll.py` | D-Bus + aux → correct → estimate SOC → state contract; `SocTracker`; durable SOC persistence |
 | `power_system_main.py` | the process: `setup()` once, then poll; `--once` for a single shot |
-| `config_default.py` | gained the `actuators` declaration (A8, A9) |
+| `components.py` + `manufacturer/victron.py` + `specifications.py` | component layer split by manufacturer; `hardware = None` for non-bus components (A10) |
+| `config_default.py` | gained the `actuators` declaration (A8, A9) and the three DS18B20 sensors (A10) |
 
 **The Coordinator spike** — `control/{service,mode,coordinator}.py`, validated by
 `test_coordinator.py` (18 tests, fakes only, no hardware). Found two real design faults before
 anything depended on them; see A7.
 
-**Tests** — 52 across `test_port_fidelity` (calibration pinned), `test_discovery`, `test_poll`,
+**Tests** — 55 across `test_port_fidelity` (calibration pinned), `test_discovery`, `test_poll`,
 `test_power_system_integration` (the *real* Battery/Kalman/System_Simulation), `test_coordinator`.
 `conftest.py` carries the `fake_bus` seam (A3) and builds shared objects through factories, which is
-the fix for the rot that put the predecessor's suite 75-red.
+the fix for the rot that put the predecessor's suite 75-red. The fake bus now also **writes**
+(`SetValue` writes through and answers `0`), which is what lets the startup sequence — and, in
+Phase 2, the Gateway's actuation — be tested off-device.
 
 ## Phase 1 verification results
 
@@ -487,3 +558,10 @@ Per the plan above, plus what Phase 1 learned:
 - **`phoenix` will now fail startup if it is ever plugged in** (A5). That is intended, and the error
   says what to do, but it is a behaviour change from the predecessor, which would instead have
   crashed on every poll.
+- **The startup sequence has only been exercised against the fake bus** (A11). The 5 s / 10 s waits
+  are a guess at how long a real Multiplus takes to bring its DC measurement hardware up; they are
+  class attributes on `VictronMultiplusII` so they can be tuned on the device without touching logic.
+  Whether the measurements *stay* readable after the inverter is stopped again — the assumption the
+  whole sequence rests on — is untested on hardware.
+- **Waking the Multiplus energises AC output for a few seconds** at every restart where its
+  measurements are missing. Bounded and intended, but it is a side effect on real loads.

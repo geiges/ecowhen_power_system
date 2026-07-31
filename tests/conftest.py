@@ -31,11 +31,16 @@ TEMP_SHUNT = "com.victronenergy.temperature.Wire_id03"
 TEMP_INTERIOR = "com.victronenergy.temperature.Wire_id04"
 
 class _FakeItem:
-    def __init__(self, value):
-        self._value = value
+    def __init__(self, values, path):
+        self._values = values
+        self._path = path
 
     def GetValue(self):
-        return self._value
+        return self._values[self._path]
+
+    def SetValue(self, value):
+        self._values[self._path] = value
+        return 0          # Victron's BusItem answers 0 on success, -1 on refusal
 
 
 class _FakeDbusProxy:
@@ -63,7 +68,7 @@ class FakeBus:
             raise KeyError(f"no such service: {service}")
         if path not in self._values[service]:
             raise KeyError(f"no such path: {service}{path}")
-        return _FakeItem(self._values[service][path])
+        return _FakeItem(self._values[service], path)
 
     def set_value(self, service, path, value):
         self._values.setdefault(service, {})[path] = value

@@ -2,8 +2,39 @@
 import pytest
 
 from ecowhen_power_system import config_default, discovery
+from ecowhen_power_system.manufacturer.victron import VictronMultiplusII
 
 from conftest import MPPT100, MULTIPLUS, FakeBus, phoenix_service
+
+
+MULTIPLUS_ON, MULTIPLUS_OFF = 3, 4
+# An "invalid" value as Victron reports it: an empty array, not an error, not None.
+DBUS_INVALID = []
+
+
+@pytest.fixture
+def fast_wake(monkeypatch):
+    """Shrink the startup waits so the give-up path does not cost 15 s of sleeping."""
+    monkeypatch.setattr(VictronMultiplusII, "MEASUREMENT_WAKE_TIMEOUT", 0.05)
+    monkeypatch.setattr(VictronMultiplusII, "MEASUREMENT_POLL_INTERVAL", 0.01)
+
+
+def _asleep_multiplus(bus_values):
+    """A Multiplus on the bus but never run since boot: no DC measurements."""
+    bus_values[MULTIPLUS]["/Mode"] = MULTIPLUS_OFF
+    bus_values[MULTIPLUS]["/Dc/0/Voltage"] = DBUS_INVALID
+    bus_values[MULTIPLUS]["/Dc/0/Current"] = DBUS_INVALID
+    return bus_values
+
+
+class WakingBus(FakeBus):
+    """A Multiplus whose measurement hardware comes alive once the inverter runs."""
+
+    def get(self, service, path="/"):
+        if self._values.get(MULTIPLUS, {}).get("/Mode") == MULTIPLUS_ON:
+            self._values[MULTIPLUS]["/Dc/0/Voltage"] = 26.2
+            self._values[MULTIPLUS]["/Dc/0/Current"] = -8.1
+        return super().get(service, path)
 
 
 def test_discovers_every_configured_component(system_config):
@@ -112,6 +143,42 @@ def test_missing_component_yields_an_unavailable_actuator_not_a_missing_one(bus_
     assert act["available"] is False
     assert "write" not in act          # no address to offer
     assert "wallbox_charge" in config["actuators"]   # unrelated actuators survive
+
+
+def test_startup_wakes_a_multiplus_with_dead_measurement_hardware(bus_values, fast_wake):
+    """Switched off since boot, the Multiplus reports no DC voltage/current at all.
+
+    Left alone it is discovered as present, contributes both variables to the poll
+    map, and then drops them on every poll — the battery-voltage average quietly
+    loses a component. Starting it once initialises the hardware; it is put back in
+    the mode it was found in.
+    """
+    bus = WakingBus(_asleep_multiplus(bus_values))
+
+    discovery.discover(bus, config_default)
+
+    assert bus_values[MULTIPLUS]["/Dc/0/Voltage"] == 26.2
+    assert bus_values[MULTIPLUS]["/Mode"] == MULTIPLUS_OFF     # found off, left off
+
+
+def test_startup_gives_up_without_killing_discovery(bus_values, fast_wake, capsys):
+    """A Multiplus that never reports measurements must not block startup."""
+    bus = FakeBus(_asleep_multiplus(bus_values))     # never wakes
+
+    config, _ = discovery.discover(bus, config_default)
+
+    assert config["components"]["multiplus"]["available"] is True
+    assert bus_values[MULTIPLUS]["/Mode"] == MULTIPLUS_OFF
+    assert "still unavailable" in capsys.readouterr().out
+
+
+def test_a_running_multiplus_is_left_alone(bus_values, fast_wake):
+    """The default bus already reports DC measurements: no start, no AC pulse."""
+    bus = FakeBus(bus_values)
+
+    discovery.discover(bus, config_default)
+
+    assert bus_values[MULTIPLUS]["/Mode"] == MULTIPLUS_ON      # untouched
 
 
 def test_contract_round_trips_through_yaml(system_config, tmp_path):

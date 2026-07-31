@@ -20,22 +20,23 @@ class System_Simulation():
     default_init_SOC = .5
     default_init_RV  = 0.0
     
-    def __init__(self, battery, sim_config, debug=False):
-
-        # Kalman-filter tuning
-        self.R_var = sim_config['R_var']
-        self.Q_soc = sim_config['Q_soc']
-        self.Q_rc = sim_config['Q_rc']
-        self.low_battery_SOC = sim_config["low_battery_SOC"]
-
-        # Battery properties (from the Generic_Battery component)
-        self.R0 = battery.R0
-        self.R1 = battery.R1
-        self.C1 = battery.C1
+    def __init__(self, battery, debug=False):
+        print(battery)
         self.ncells = battery.n_cells
         self.Q_tot = battery.Q_tot  # in Ah
         self.charge_efficiency = battery.charge_efficiency
+        self.low_battery_SOC = battery.SOC_low
 
+        # Battery properties (from the Generic_Battery component)
+        self.R0 = battery.model_parameter.R0
+        self.R1 = battery.model_parameter.R1
+        self.C1 = battery.model_parameter.C1
+        
+        # Kalman-filter tuning
+        self.R_var = battery.model_parameter.R_var
+        self.Q_soc =battery.model_parameter.Q_soc
+        self.Q_rc =battery.model_parameter.Q_rc
+        
 
         self.battery_simulation = Battery(self.Q_tot,
                                           self.R0,
