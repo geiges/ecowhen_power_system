@@ -20,12 +20,12 @@ def test_cable_correction_constants_match_the_installation():
 
 
 def test_battery_model_constants_match_the_installation():
-    batt = config.batt_config_V1
-    assert batt["Q_tot"] == 210      # Ah
-    assert batt["ncells"] == 8
-    assert batt["R0"] == 0.01        # ohm
-    assert batt["R1"] == 0.04        # ohm
-    assert batt["C1"] == 2000        # farad
+    batt = config.battery
+    assert batt.Q_tot == 210      # Ah
+    assert batt.n_cells == 8
+    assert batt.R0 == 0.01        # ohm
+    assert batt.R1 == 0.04        # ohm
+    assert batt.C1 == 2000        # farad
 
 
 def test_expected_components_are_configured():

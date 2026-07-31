@@ -7,6 +7,8 @@ Created on Thu Feb 12 17:04:18 2026
 """
 from typing import NamedTuple
 
+from .specifications import SPECS_BATTERY_CELL
+
 class VariableType(NamedTuple):
     basename :str
     subaddress : str
@@ -24,7 +26,53 @@ class VeDirectSetType(NamedTuple):
     allowed_values: list = []   # empty = any value accepted
     readable: bool = True       # also emit a vedirect_get read command
 
-class BaseComponent(object):
+ 
+class Generic_Battery(object):
+    Q_tot : float
+    n_cells : int
+    cell_type : str
+    nominal_voltage : float
+    min_safety_voltage : float      # in V
+    max_safety_voltage : float      # in V
+    min_safety_temperature : float  # in °C
+    max_safety_temperature : float  # in °C
+    max_safety_load_watt : float    # in Watt
+    R0 : float = None # optional
+    R1 : float = None # optional
+    C1 : float = None # optional
+    
+    def __init__(self,
+                 short_name,
+                 component_type,
+                 cell_type,
+                 n_cells,
+                 capacity_ah, 
+                 charge_efficiency=1.0):
+        
+        spec = SPECS_BATTERY_CELL[cell_type]
+        self.short_name = short_name
+        self.component_type = component_type
+        self.cell_type = cell_type
+        self.charge_efficiency = charge_efficiency
+        self.Q_tot = capacity_ah
+        self.n_cells = n_cells
+        self.nominal_voltage = spec['nominal_voltage'] * n_cells
+        self.min_safety_voltage = spec['min_voltage'] * n_cells
+        self.max_safety_voltage = spec['max_voltage'] * n_cells
+        self.min_safety_temperature = spec['min_temp']
+        self.max_safety_temperature = spec['max_temp']
+        self.max_safety_load_watt = spec['max_charge_rate'] * self.nominal_voltage * self.Q_tot
+        
+    def init_equivalent_circuit_model(self,
+                                      R0,
+                                      R1,
+                                      C1):
+        self.R0 = R0
+        self.R1 = R1
+        self.C1 = C1
+        
+    
+class VictronBaseComponent(object):
     """
     Base class for system components to provide some common functions
     """
@@ -46,42 +94,12 @@ class BaseComponent(object):
         self.variable_list = [
             f"{self.short_name}/{var.basename}" for var in self.component_variables
             ]
-        
-    def init_connected_PV(self, 
-                lon,
-                lat,
-                azimuth,
-                tilt,
-                PV_peak,
-                P_limit):
-        """
-        Set the data for the PV system connected to Victron device
 
-        Parameters
-        ----------
-        lon : TYPE
-            DESCRIPTION.
-        lat : TYPE
-            DESCRIPTION.
-        azimuth : TYPE
-            DESCRIPTION.
-        tilt : TYPE
-            DESCRIPTION.
-        PV_peak : TYPE
-            DESCRIPTION.
-        P_limit : TYPE
-            DESCRIPTION.
+    def init_connected_PV(self, lon, lat, azimuth, tilt, PV_peak, P_limit):
+        """Set the data for the PV system connected to the Victron device."""
+        self.PV_system = dict(lon=lon, lat=lat, azimuth=azimuth, tilt=tilt,
+                              PV_peak=PV_peak, P_limit=P_limit)
 
-        Returns
-        -------
-        None.
-
-        """
-        
-        self. PV_system = dict(lon=lon, lat=lat, azimuth=azimuth, tilt=tilt, PV_peak = PV_peak, P_limit=P_limit)
-            
-            
-        
     def _components_on_bus(self, dbus):
         """
         Check is type of device is available on bus and returns instances
@@ -186,7 +204,7 @@ class BaseComponent(object):
         return voltage
             
 
-class VictronSystem(BaseComponent):
+class VictronSystem(VictronBaseComponent):
     """
     Victron solar charger component
     """
@@ -204,7 +222,7 @@ class VictronSystem(BaseComponent):
         
         
     
-class VictronSolarCharger(BaseComponent):
+class VictronSolarCharger(VictronBaseComponent):
     """
     Victron solar charger component
     """
@@ -228,8 +246,8 @@ class VictronSolarCharger(BaseComponent):
         
         if connected_PV is not None:
             self.init_connected_PV(**connected_PV)
-        
-class VictronSolarChargerWithDCLoad(BaseComponent):
+
+class VictronSolarChargerWithDCLoad(VictronBaseComponent):
     """
     Victron solar charger component
     """
@@ -252,10 +270,10 @@ class VictronSolarChargerWithDCLoad(BaseComponent):
     def __init__(self, product_name, short_name, const_consumption=0.0, connected_PV=None):
          
         component_type = 'com.victronenergy.solarcharger'
-        super().__init__(product_name, short_name, component_type, const_consumption) 
+        super().__init__(product_name, short_name, component_type, const_consumption)
         self.connector_R0 = None
-        
-class VictronMultiplusII(BaseComponent):
+
+class VictronMultiplusII(VictronBaseComponent):
     """
     Victron solar charger component
     """
@@ -283,7 +301,7 @@ class VictronMultiplusII(BaseComponent):
         if connected_PV is not None:
             self.init_connected_PV(**connected_PV)
         
-class VictronPhoenix24_800(BaseComponent):
+class VictronPhoenix24_800(VictronBaseComponent):
     """
     Victron solar charger component
     """
@@ -304,7 +322,7 @@ class VictronPhoenix24_800(BaseComponent):
         self.connector_R0 = None
         
 
-class VictronBatteryMonitor(BaseComponent):
+class VictronBatteryMonitor(VictronBaseComponent):
     pass # not implemented
         
 

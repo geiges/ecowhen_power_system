@@ -15,47 +15,26 @@ from .battery import Battery
 from .kalman import ExtendedKalmanFilter
 
 
-# system config
-config_V1 = {
-    "Q_tot" : 210,
-    "R0" : 0.01,
-    "R1" : 0.04,
-    "C1" : 2000,
-    "time_step" : 60,
-    "ncells" : 8,
-    "R_var" : 0.5**2,   # measurement noise variance (V²)
-    "Q_soc" : 1e-6,     # process noise for SOC state
-    "Q_rc"  : 1e-6,     # process noise for RC voltage state
-    "charge_efficiency" : 1.0,
-    "version" : 'V1'
-}
-
-
-
 class System_Simulation():
 
     default_init_SOC = .5
     default_init_RV  = 0.0
     
-    def __init__(self, sim_config, debug=False):
+    def __init__(self, battery, sim_config, debug=False):
 
-
-        
-
+        # Kalman-filter tuning
         self.R_var = sim_config['R_var']
         self.Q_soc = sim_config['Q_soc']
         self.Q_rc = sim_config['Q_rc']
-        
-        # Battery properties
-        self.R0 = sim_config['R0']
-        self.R1 = sim_config['R1']
-        self.C1 = sim_config['C1']
-        self.ncells = sim_config['ncells']
-        self.Q_tot = sim_config['Q_tot'] # in Ah
         self.low_battery_SOC = sim_config["low_battery_SOC"]
 
-        #system_properties
-        self.charge_efficiency = sim_config['charge_efficiency']
+        # Battery properties (from the Generic_Battery component)
+        self.R0 = battery.R0
+        self.R1 = battery.R1
+        self.C1 = battery.C1
+        self.ncells = battery.n_cells
+        self.Q_tot = battery.Q_tot  # in Ah
+        self.charge_efficiency = battery.charge_efficiency
 
 
         self.battery_simulation = Battery(self.Q_tot,

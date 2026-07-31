@@ -16,7 +16,7 @@ from ecowhen_power_system import config_default, discovery, paths, poll, power_s
 def real_sim(monkeypatch):
     monkeypatch.setattr(poll, "retrieve_aux_data", lambda c, debug=False: {})
     from ecowhen_power_system import simulation
-    return simulation.System_Simulation(config_default.batt_config_V1, debug=False)
+    return simulation.System_Simulation(config_default.battery, config_default.batt_config_V1, debug=False)
 
 
 @pytest.fixture
@@ -98,7 +98,7 @@ def test_soc_state_survives_a_restart(fake_bus, system_config, psystem, runtime_
     from ecowhen_power_system import simulation
 
     t = datetime(2026, 7, 15, 12, 0)
-    sim = simulation.System_Simulation(config_default.batt_config_V1, debug=False)
+    sim = simulation.System_Simulation(config_default.battery, config_default.batt_config_V1, debug=False)
     state = _poll(fake_bus, psystem, system_config, sim, poll.SocTracker(), t)
 
     poll.save_soc_state(
@@ -106,7 +106,7 @@ def test_soc_state_survives_a_restart(fake_bus, system_config, psystem, runtime_
         rc_voltage=float(sim.Kf.x[1, 0]), t_now=t, soc_above_threshold_since=None,
     )
 
-    revived = simulation.System_Simulation(config_default.batt_config_V1, debug=False)
+    revived = simulation.System_Simulation(config_default.battery, config_default.batt_config_V1, debug=False)
     loaded = poll.load_soc_state(runtime_dirs.SOC_STATE_PATH)
     assert poll.restore_simulator(
         revived, loaded, timedelta(hours=1), t + timedelta(minutes=1)

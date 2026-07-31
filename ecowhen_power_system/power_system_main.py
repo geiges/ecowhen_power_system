@@ -62,7 +62,7 @@ def setup(bus, tz, debug=False):
     if config.simulate_system:
         from . import simulation
 
-        simulator = simulation.System_Simulation(config.batt_config_V1, debug)
+        simulator = simulation.System_Simulation(config.battery, config.batt_config_V1, debug)
         soc_state = poll.load_soc_state(paths.SOC_STATE_PATH)
         if poll.restore_simulator(simulator, soc_state, MAX_SOC_STATE_AGE, t_now):
             soc_tracker.since = soc_state["soc_above_threshold_since"]

@@ -53,8 +53,9 @@ By contrast `../ecowhen_data_api`: **37 passed, 0 failed.** It is a trustworthy 
 1. **Four processes**, in dependency order: Power System → Gateway → Logger → Control.
 2. **Power System owns the system model** — topology (`system_configuration.yaml`) and present state
    (`state.json`). Both contracts, one producer. SOC is not measurable: no sensor reports it, it
-   exists only as Kalman-filter output over voltage/current/temperature. Estimation is therefore
-   inseparable from polling and belongs here, not in the Logger (where it lives today) or in Control.
+   exists only as Kalman-filter output over voltage/current/temperature and by counting Ampere hours. 
+   While the system is running, the colomn counting method does produce the reliable values for SOC.   
+   Estimation is therefore inseparable from polling and belongs here, not in the Logger (where it lives today) or in Control.
    Forward projection is **not** here — that is Control's `projection.py`.
 3. **Exactly one process WRITES hardware** (Gateway). Reads are idempotent and conflict-free, so
    the Gateway keeps its own `dbus_read` for verify-readback rather than routing reads through

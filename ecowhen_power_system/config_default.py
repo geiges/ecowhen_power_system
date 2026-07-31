@@ -38,8 +38,17 @@ PV_componentes = {
     }
     
     
-        
-        
+# 8-cell LiFePo4 battery, 210Ah. Not a D-Bus device, so it is kept out of
+# system_components (the discovery list); it feeds the battery simulation.
+battery = components.Generic_Battery("battery",
+                           component_type='battery',
+                           cell_type='lifepo4',
+                           n_cells=8,
+                           capacity_ah=210)
+battery.init_equivalent_circuit_model(R0=0.01,
+                                      R1=0.04,
+                                      C1=2000)
+
 
 #system setup
 system_components = [
@@ -77,24 +86,14 @@ measurement_components = {
         'voltage_offset' :  -0.16},
     }
 
-# Battery Simulation configuration
+# Battery simulation / Kalman-filter tuning. Physical battery parameters
+# (Q_tot, R0, R1, C1, ncells, charge_efficiency) come from `battery` above.
 batt_config_V1 = {
-    "Q_tot" : 210,
-    "R0" : 0.01,
-    "R1" : 0.04,
-    "C1" : 2000,
-    "ncells" : 8,
     "R_var" : 0.5**2,   # measurement noise variance (V²)
     "Q_soc" : 1e-6,     # process noise for SOC state
     "Q_rc"  : 1e-6,     # process noise for RC voltage state
-    "charge_efficiency" : 1.0,
-    "version" : 'V1',
     "low_battery_SOC" : 0.2,
-    "min_safety_voltage" : 24.3,
-    "max_safety_voltage" : 28.9,
-    "min_safety_temperature" : 5,
-    "max_safety_temperature" : 42.5,
-    "max_safety_ac_load_w" : 2500,
+    "version" : 'V1',
 }
 
 from . import aux_components as aux_comp
