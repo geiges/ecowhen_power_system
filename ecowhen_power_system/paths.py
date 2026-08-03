@@ -17,7 +17,10 @@ DATA_DIR = Path(os.environ.get("ECOPS_DATA_DIR", "data"))
 # --- the two contracts (ephemeral: the Power System rewrites both) ---
 SYSTEM_CONFIG_PATH = RUNTIME_DIR / "system_configuration.yaml"
 STATE_PATH = RUNTIME_DIR / "state.json"
-STATE_MAPPING_PATH = RUNTIME_DIR / "state_mapping.yaml"
+# No state_mapping.yaml: `states_to_log` in the topology contract already carries
+# every state's mapping, and the packed `state` code is positional in exactly that
+# order. A second file restating it with explicit indices is one more place for the
+# same fact to drift out of step with the code that packs it.
 
 # --- what Control publishes (ephemeral: recomputed on every tick) ---
 MODES_STATUS_PATH = RUNTIME_DIR / "modes_status.json"

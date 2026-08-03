@@ -462,6 +462,36 @@ def test_ended_bookings_are_pruned_on_the_next_edit(client, runtime_dirs):
     assert body["bookings"] == []
 
 
+def test_the_daily_aggregate_is_listed_not_just_servable(client, runtime_dirs):
+    """A client that syncs from the listing never learns about a file the listing
+    omits, so serving it on request is not enough."""
+    aggregations = runtime_dirs.DATA_DIR / "aggregations"
+    aggregations.mkdir(parents=True, exist_ok=True)
+    (aggregations / "daily.csv").write_text("date,solar_total\n26-08-03,1.5\n")
+    listed = client.get("/files/data/", headers=AUTH).get_json()["files"]
+    assert "aggregations/daily.csv" in [f["name"] for f in listed]
+
+    resp = client.get("/files/data/aggregations/daily.csv", headers=AUTH)
+    assert resp.status_code == 200
+
+
+def test_the_agent_list_comes_from_the_config_not_a_literal(client, runtime_dirs):
+    """The dashboard's per-agent cards read this. Adding an agent to ControlConfig
+    must be the only edit needed to make it appear."""
+    runtime_dirs.DECISION_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    runtime_dirs.DECISION_LOG_PATH.write_text(
+        json.dumps({"agent": "system_safety", "rationale": "OK"}) + "\n")
+
+    agents = client.get("/control/agents", headers=AUTH).get_json()
+    by_name = {a["name"]: a for a in agents}
+
+    assert set(by_name) == {"system_safety", "soc_wallbox_charge",
+                            "forecast_wallbox", "wallbox_optimal_charge"}
+    assert by_name["system_safety"]["last_result"]["rationale"] == "OK"
+    assert by_name["soc_wallbox_charge"]["last_result"] is None
+    assert by_name["system_safety"]["enabled"] is True
+
+
 def test_the_schedule_is_served_and_says_who_is_missing(client, runtime_dirs):
     """The calendar a UI renders. Same 503-not-404 rule as every other status file."""
     resp = client.get("/control/schedule", headers=AUTH)

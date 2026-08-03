@@ -40,7 +40,12 @@ def default_endpoints() -> dict:
         ),
         "data": FileEndpoint(
             base_dir=paths.DATA_DIR,
-            allow_patterns=["*.csv", "*.json", "*.yaml", "daily/*.csv"],
+            # Subdirectory patterns must be listed explicitly: `list_files` uses
+            # `Path.glob`, which does not recurse, so a bare "*.csv" would serve
+            # `aggregations/daily.csv` on request but never list it — and a client
+            # that syncs from the listing would never learn the file exists.
+            allow_patterns=["*.csv", "*.json", "*.yaml",
+                            "aggregations/*.csv", "daily/*.csv"],
         ),
     }
 

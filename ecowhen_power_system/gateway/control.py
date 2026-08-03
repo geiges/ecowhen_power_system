@@ -8,6 +8,7 @@ Routes
 ------
 GET  /control/modes                     modes_status.json, as Control last wrote it
 GET  /control/services                  services_status.json
+GET  /control/agents                    every agent, enabled flag, last result
 GET  /control/schedule                  the calendar: every booking ahead of now
 GET  /control/modes/requests            the user's standing intent and bookings
 POST /control/modes/<name>/activate     want <name> now, or {"from","until"} to book it
@@ -278,6 +279,31 @@ def put_config():
 
     updated.save(paths.CONTROL_CONFIG_PATH)
     return jsonify(dataclasses.asdict(updated))
+
+
+@control_bp.get("/agents")
+def get_agents():
+    """Every agent, its enabled flag, and the last thing it said.
+
+    The agent list is `ControlConfig.agents`' own fields rather than a literal, so
+    an agent added there appears here without a second edit.
+    """
+    cfg = ControlConfig.load_or_default(paths.CONTROL_CONFIG_PATH)
+    agents = dataclasses.asdict(cfg.agents)
+
+    last = {}
+    for entry in reversed(DecisionLog(paths.DECISION_LOG_PATH).tail(500)):
+        name = entry.get("agent") if isinstance(entry, dict) else None
+        if name and name not in last:
+            last[name] = entry
+        if len(last) >= len(agents):
+            break
+
+    return jsonify([
+        {"name": name, "enabled": conf.get("enabled", True),
+         "last_result": last.get(name)}
+        for name, conf in agents.items()
+    ])
 
 
 @control_bp.get("/log")
