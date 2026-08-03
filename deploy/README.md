@@ -140,10 +140,32 @@ real days (A18); on-device, compare `data/log_*.csv` headers and spot-check a ro
 ## Going to full control (phase 4, later)
 
 Stop the predecessor first — two writers on one actuator is the one genuinely
-dangerous failure in this rebuild. Then:
+dangerous failure in this rebuild. Then, in two steps:
 
 ```sh
-ECOPS_PARALLEL=0 ./deploy/start.sh --restart
+ECOPS_PARALLEL=0 ./deploy/start.sh --restart --no-control   # 1. prove the writes
+ECOPS_PARALLEL=0 ./deploy/start.sh --restart                # 2. bring Control up
 ```
 
-`start.sh` prints a warning and waits 5 s before starting in that mode.
+`start.sh` prints a warning and waits 5 s before starting in either mode.
+
+**Why two steps.** The VE.Direct and Tasmota *write* transports have never run —
+parallel mode 403s every POST — and they can only be proven by hand. They cannot be
+proven while Control runs: its coordinator drives every service back to target on
+each tick, so a hand-switched fan is off again within 60 s and the test tells you
+nothing. Between the two commands, nothing arbitrates the hardware; whatever you
+switch stays switched.
+
+What to run in step 1, on `mppt100_load` and then `wallbox_relay`:
+
+```sh
+curl -s -H "X-API-Key: $ECOPS_API_KEY" -H 'Content-Type: application/json' \
+     -d '{"on": true}' http://127.0.0.1:5101/actuators/mppt100_load
+curl -s -H "X-API-Key: $ECOPS_API_KEY" http://127.0.0.1:5101/actuators/mppt100_load
+```
+
+**Judge it on the second call, not the first.** A POST reports the value it *wrote*;
+a `vregd` that exits 0 without moving the fan looks identical to one that worked.
+On the fan expect `4` written and `4` read; switching off writes `0` and reads `1`,
+which is the write/read asymmetry surviving the round trip. A 502 names the failure
+— `vregd executable not found`, `vregd failed: …`, or `unreachable at […]`.

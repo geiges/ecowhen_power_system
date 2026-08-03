@@ -244,19 +244,31 @@ cutover — it is the exclusive step.
 ### The cutover
 
 Stop the predecessor's `control_runner.py` — confirm it is stopped, not merely quiet — then
-`ECOPS_PARALLEL=0 ./deploy/start.sh --restart`, which is what starts Control at all. Revert =
-kill the `ecops` tmux session, restart the old runner.
+`ECOPS_PARALLEL=0 ./deploy/start.sh --restart --no-control`. Revert = kill the `ecops` tmux
+session, restart the old runner.
+
+**`--no-control` is not optional ceremony.** The write transports can only be proven by hand,
+and they cannot be proven while Control runs: its coordinator drives every service back to
+target on each tick, so a hand-switched fan goes off again within 60 s and the test tells you
+nothing. Prove them first, then `./deploy/start.sh --restart` brings Control up.
 
 Four things run for the first time in that first minute. Watch them in this order:
 
 1. **The startup sequence**, if the Multiplus's DC measurements are missing — it wakes the
    inverter, energising AC output for a few seconds.
-2. **`vregd`** — the fan's VE.Direct write, and the one place `int(token, 0)` parses the output
-   of a tool that has never run. `POST /actuators/mppt100_load {"on": true}` by hand, then
-   `GET`: the write is `4`, the readback should be `4`; off writes `0` but reads `1`. A 502 is
-   the transport talking, not the fan.
-3. **The Tasmota write path** — same, by hand, on `wallbox_relay`. Its old failure mode was
-   silently doing nothing; the Gateway answers 502 instead, so believe the code.
+2. **`vregd`** — the fan's VE.Direct **write**, and only the write: `mppt100_load` reads over
+   D-Bus, and it is the only VE.Direct actuator, so `vedirect_read` is never reached and
+   `int(token, 0)` never runs. What is unproven is that `vregd` is on PATH and that
+   `vregd -c <port> -s 0xEDAB un8:4` is the right syntax. `POST /actuators/mppt100_load
+   {"on": true}` by hand, then `GET`: the write is `4`, the readback should be `4`; off writes
+   `0` but reads `1`. **Judge it on the readback, not the POST** — a `vregd` that exits 0
+   without moving the fan reports `value_written: 4` and is only visible as an unchanged
+   `GET`. A 502 names which of the three failures it was.
+3. **The Tasmota write path** — same, by hand, on `wallbox_relay`. Better proven than it
+   looks: `aux_components` already polls these plugs at `{url}/cm?cmnd=Status%208` with the
+   same URL-and-fallback pair, and that ran on the device, so the addresses and the `/cm`
+   endpoint hold. New here are `cmnd=Power 1` and reading the `POWER` key back. Its old
+   failure mode was silently doing nothing; the Gateway answers 502 instead.
 4. **Control's first tick**, which switches the Multiplus **off** if no mode wants it. That is
    correct for this installation — `services.ac_inverter_default_on: false` is intended, not a
    default nobody looked at. Expect the inverter to go off, and do not read it as a fault.
@@ -276,8 +288,10 @@ thinks it is doing, and `data/control_log.jsonl` says why.
   still the one setting that changes what an otherwise idle system does, which is why it is a
   knob rather than a literal in `actuation.py`.
 - **The Gateway's `vregd` and Tasmota *write* transports have never run**, on device or off —
-  parallel mode 403s every POST. The VE.Direct output parse and the Tasmota `{"POWER": "ON"}`
-  answer are assumptions about tools nobody has executed. Check by hand at the cutover.
+  parallel mode 403s every POST. The unproven parts are narrower than they look: `vregd`'s
+  presence and `-s` syntax (the read path is D-Bus, so `vedirect_read` is unreachable), and
+  Tasmota's `cmnd=Power 1` (the URLs and `/cm` are already proven by the aux polling). Check
+  both by hand at the cutover, judging on the readback rather than the POST.
 - **The mode graph has never converged against real hardware latency.** Services retry five
   times, then sit in `failed`.
 - **The startup sequence has only run against the fake bus.** The 5 s / 10 s waits are a guess;

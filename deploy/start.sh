@@ -1,10 +1,15 @@
 #!/bin/bash
 # Start the three processes in a tmux session. Run ON THE DEVICE.
 #
-#   ./deploy/start.sh [--restart]
+#   ./deploy/start.sh [--restart] [--no-control]
 #
-#   --restart   kill an existing session and start fresh. Without it, an already
-#               running session is left alone.
+#   --restart     kill an existing session and start fresh. Without it, an already
+#                 running session is left alone.
+#   --no-control  full-control mode without Control. This is the cutover step: the
+#                 Gateway accepts writes, so the VE.Direct and Tasmota transports
+#                 can be proven by hand — and they cannot be while Control runs,
+#                 because its coordinator drives every service back to target on
+#                 each tick and would undo the poke within 60 s.
 #
 # --extra device on every uv run is what keeps pydbus in the venv: it is an optional
 # extra so the tests install off-device (A3), so a plain `uv run` would leave it out
@@ -19,7 +24,14 @@ cd "$(dirname "$0")/.."
 . deploy/config.sh
 
 RESTART=0
-[ "${1:-}" = "--restart" ] && RESTART=1
+NO_CONTROL=0
+for arg in "$@"; do
+    case "$arg" in
+        --restart)    RESTART=1 ;;
+        --no-control) NO_CONTROL=1 ;;
+        *) echo "ERROR: unknown option '$arg'" >&2; exit 2 ;;
+    esac
+done
 
 command -v tmux >/dev/null 2>&1 || { echo "ERROR: tmux not installed" >&2; exit 1; }
 
@@ -71,13 +83,19 @@ run logger  "uv run --no-dev --extra device ecops-logger"
 # and the moment the interlock was lifted it would start actuating with no further
 # ceremony. It starts only in full-control mode, deliberately.
 STARTED="power-system, gateway (:$ECOPS_PORT), logger"
-if [ "$ECOPS_PARALLEL" != "1" ]; then
+if [ "$ECOPS_PARALLEL" != "1" ] && [ "$NO_CONTROL" -eq 0 ]; then
     run control "uv run --no-dev --extra device ecops-control"
     STARTED="$STARTED, control"
 fi
 
 echo
 echo "Started '$ECOPS_SESSION': $STARTED"
+if [ "$ECOPS_PARALLEL" != "1" ] && [ "$NO_CONTROL" -eq 1 ]; then
+    echo
+    echo "  CONTROL IS NOT RUNNING. Nothing is arbitrating the hardware — whatever"
+    echo "  you switch by hand stays switched. Prove the write transports, then:"
+    echo "    ./deploy/start.sh --restart          # brings Control up"
+fi
 echo "  attach:   tmux attach -t $ECOPS_SESSION"
 echo "  data:     $ECOPS_DATA_DIR"
 echo "  contracts:$ECOPS_RUNTIME_DIR"
