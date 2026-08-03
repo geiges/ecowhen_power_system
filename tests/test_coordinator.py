@@ -8,10 +8,12 @@ The fakes stand in for the real actuators, but the state machine under test is t
 real one.
 """
 import json
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from ecowhen_power_system.control.coordinator import Coordinator, ModeRequest
+from ecowhen_power_system.control.coordinator import (Booking, Coordinator,
+                                                      ModeRequest)
 from ecowhen_power_system.control.mode import Mode, ModeState
 from ecowhen_power_system.control.service import ServicePhase, SystemService
 
@@ -432,3 +434,203 @@ def test_status_files_are_written_for_the_gateway_to_serve(tmp_path):
     services_status = json.loads(services_path.read_text())
     assert services_status["services"]["ac_inverter"]["requirers"] == ["wallbox"]
     assert list(tmp_path.glob("*.tmp")) == []      # written atomically
+
+
+# --- bookings ----------------------------------------------------------------
+#
+# A booking is a mode wanted over an interval. The coordinator resolves which ones
+# cover `now` on every tick, so nothing latches and no firing moment can be missed.
+
+T0 = datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc)
+
+
+def booked(coord, *, agent="planner", mode="wallbox", start=None, end=None):
+    coord.set_plan(agent, [Booking(mode=mode,
+                                   start=start or T0,
+                                   end=end or T0 + timedelta(hours=2))])
+
+
+def test_a_booking_is_inert_outside_its_interval_and_active_inside_it():
+    coord, _, modes = build({"wallbox": dict(required_services=[])}, {})
+    booked(coord)
+
+    coord.tick(CONFIG, T0 - timedelta(minutes=1))
+    assert modes["wallbox"].requesters == set()
+
+    coord.tick(CONFIG, T0)
+    assert modes["wallbox"].requesters == {"planner"}
+
+    # `end` is exclusive: at exactly 14:00 the window is over.
+    coord.tick(CONFIG, T0 + timedelta(hours=2))
+    assert modes["wallbox"].requesters == set()
+
+
+def test_a_plan_stands_across_ticks_without_being_restated():
+    """The whole point: the agent speaks once, the boundary still lands on a tick."""
+    coord, _, modes = build({"wallbox": dict(required_services=[])}, {})
+    booked(coord)
+
+    for minute in range(0, 120, 15):
+        coord.tick(CONFIG, T0 + timedelta(minutes=minute))
+        assert modes["wallbox"].requesters == {"planner"}, f"dropped at +{minute}min"
+
+
+def test_an_agent_replaces_only_its_own_plan():
+    coord, _, modes = build({"wallbox": dict(required_services=[]),
+                             "cooling": dict(required_services=[])}, {})
+    coord.set_plan("planner_a", [Booking("wallbox", T0, T0 + timedelta(hours=2))])
+    coord.set_plan("planner_b", [Booking("cooling", T0, T0 + timedelta(hours=2))])
+
+    coord.set_plan("planner_a", [])              # a_a revises: it wants nothing now
+    coord.tick(CONFIG, T0 + timedelta(minutes=5))
+
+    assert modes["wallbox"].requesters == set()
+    assert modes["cooling"].requesters == {"planner_b"}
+
+
+def test_dropping_a_plan_releases_the_mode_it_was_driving():
+    """A plan outlives its author, so a disabled or broken agent must lose it."""
+    coord, _, modes = build({"wallbox": dict(required_services=[])}, {})
+    booked(coord)
+    coord.tick(CONFIG, T0)
+    assert modes["wallbox"].requesters == {"planner"}
+
+    coord.drop_plan("planner")
+    coord.tick(CONFIG, T0 + timedelta(minutes=1))
+    assert modes["wallbox"].requesters == set()
+
+
+def test_a_booking_and_a_request_for_one_mode_are_two_requesters():
+    """Reference counting spans both ways of wanting a mode."""
+    coord, _, modes = build({"wallbox": dict(required_services=[])}, {})
+    booked(coord)
+    coord.set_agent_requests([ModeRequest("wallbox", True, "fast_agent")])
+    coord.tick(CONFIG, T0)
+    assert modes["wallbox"].requesters == {"planner", "fast_agent"}
+
+    # The fast agent falls silent; the booking still holds the mode up.
+    coord.set_agent_requests([])
+    coord.tick(CONFIG, T0 + timedelta(minutes=1))
+    assert modes["wallbox"].requesters == {"planner"}
+
+
+def test_the_schedule_is_published_with_its_sources_and_ages(tmp_path):
+    schedule_path = tmp_path / "mode_schedule.json"
+    coord, _, _ = build({"wallbox": dict(required_services=[])}, {},
+                        schedule_path=schedule_path)
+    coord.set_plan("planner", [Booking("wallbox", T0 + timedelta(hours=1),
+                                       T0 + timedelta(hours=3), reason="solar")],
+                   generated_at=T0)
+    coord.tick(CONFIG, T0)
+
+    published = json.loads(schedule_path.read_text())
+    row, = published["bookings"]
+    assert row["mode"] == "wallbox"
+    assert row["source"] == "planner"
+    assert row["reason"] == "solar"
+    assert row["generated_at"] == T0.isoformat()
+    assert list(tmp_path.glob("*.tmp")) == []
+
+
+def test_a_user_booking_drives_the_mode_over_its_interval(tmp_path):
+    """The user's calendar is durable and lives in a file the Gateway writes, but it
+    resolves through exactly the same path as an agent's plan."""
+    requests_path = tmp_path / "mode_requests.json"
+    requests_path.write_text(json.dumps({
+        "modes": [],
+        "bookings": [{"id": "abc12345", "mode": "wallbox",
+                      "start": T0.isoformat(),
+                      "end": (T0 + timedelta(hours=2)).isoformat(),
+                      "reason": "leaving at 14:00"}],
+        "updated_at": (T0 - timedelta(hours=6)).isoformat(),
+    }))
+    coord, _, modes = build({"wallbox": dict(required_services=[])}, {},
+                            mode_requests_path=requests_path)
+
+    coord.tick(CONFIG, T0 - timedelta(minutes=1))
+    assert modes["wallbox"].requesters == set()
+
+    coord.tick(CONFIG, T0 + timedelta(minutes=30))
+    assert modes["wallbox"].requesters == {"user"}
+
+    coord.tick(CONFIG, T0 + timedelta(hours=2))
+    assert modes["wallbox"].requesters == set()
+
+
+def test_a_user_booking_is_re_read_every_tick(tmp_path):
+    """Control never holds it in memory — the Gateway may rewrite it at any moment."""
+    requests_path = tmp_path / "mode_requests.json"
+    requests_path.write_text(json.dumps({"modes": [], "bookings": []}))
+    coord, _, modes = build({"wallbox": dict(required_services=[])}, {},
+                            mode_requests_path=requests_path)
+
+    coord.tick(CONFIG, T0)
+    assert modes["wallbox"].requesters == set()
+
+    requests_path.write_text(json.dumps({"modes": [], "bookings": [
+        {"id": "x", "mode": "wallbox", "start": T0.isoformat(),
+         "end": (T0 + timedelta(hours=1)).isoformat()}]}))
+    coord.tick(CONFIG, T0 + timedelta(minutes=1))
+    assert modes["wallbox"].requesters == {"user"}
+
+
+def test_a_standing_want_and_a_booking_coexist(tmp_path):
+    """`modes` has no end; a booking does. Both are the user, so one requester."""
+    requests_path = tmp_path / "mode_requests.json"
+    requests_path.write_text(json.dumps({
+        "modes": ["cooling"],
+        "bookings": [{"id": "x", "mode": "wallbox", "start": T0.isoformat(),
+                      "end": (T0 + timedelta(hours=1)).isoformat()}],
+    }))
+    coord, _, modes = build({"wallbox": dict(required_services=[]),
+                             "cooling": dict(required_services=[])}, {},
+                            mode_requests_path=requests_path)
+
+    coord.tick(CONFIG, T0)
+    assert modes["wallbox"].requesters == {"user"}
+    assert modes["cooling"].requesters == {"user"}
+
+    # The booking ends; the standing want does not.
+    coord.tick(CONFIG, T0 + timedelta(hours=2))
+    assert modes["wallbox"].requesters == set()
+    assert modes["cooling"].requesters == {"user"}
+
+
+def test_an_unparseable_user_booking_does_not_cost_the_others(tmp_path):
+    requests_path = tmp_path / "mode_requests.json"
+    requests_path.write_text(json.dumps({"modes": [], "bookings": [
+        {"id": "bad", "mode": "wallbox", "start": "not-a-date", "end": "also-not"},
+        {"id": "good", "mode": "wallbox", "start": T0.isoformat(),
+         "end": (T0 + timedelta(hours=1)).isoformat()},
+    ]}))
+    coord, _, modes = build({"wallbox": dict(required_services=[])}, {},
+                            mode_requests_path=requests_path)
+
+    coord.tick(CONFIG, T0)
+    assert modes["wallbox"].requesters == {"user"}
+
+
+def test_the_user_calendar_is_published_alongside_the_agents(tmp_path):
+    requests_path = tmp_path / "mode_requests.json"
+    schedule_path = tmp_path / "mode_schedule.json"
+    requests_path.write_text(json.dumps({"modes": [], "bookings": [
+        {"id": "x", "mode": "wallbox", "start": (T0 + timedelta(hours=4)).isoformat(),
+         "end": (T0 + timedelta(hours=6)).isoformat(), "reason": "leaving at 18:00"}]}))
+    coord, _, _ = build({"wallbox": dict(required_services=[])}, {},
+                        mode_requests_path=requests_path, schedule_path=schedule_path)
+    coord.set_plan("planner", [Booking("wallbox", T0 + timedelta(hours=1),
+                                       T0 + timedelta(hours=2))], generated_at=T0)
+    coord.tick(CONFIG, T0)
+
+    rows = json.loads(schedule_path.read_text())["bookings"]
+    assert [r["source"] for r in rows] == ["planner", "user"]   # sorted by start
+
+
+def test_bookings_that_have_ended_leave_the_schedule(tmp_path):
+    schedule_path = tmp_path / "mode_schedule.json"
+    coord, _, _ = build({"wallbox": dict(required_services=[])}, {},
+                        schedule_path=schedule_path)
+    booked(coord)
+
+    coord.tick(CONFIG, T0 + timedelta(hours=3))
+    assert json.loads(schedule_path.read_text())["bookings"] == []
