@@ -1,9 +1,11 @@
 # Refactor: `ecowhen_power_system` — greenfield 4-process rebuild
 
-> **Status:** Phase 1 complete, with the A12–A15 revisions applied on top. Phase 2 not started.
+> **Status:** all four phases complete, nothing run on real hardware yet.
 > See [Implementation status](#implementation-status) at the bottom for exactly where
-> it stopped and what to pick up first. **Amendments A1–A15 change the plan below** — read them
-> alongside it; A12 in particular supersedes the measurement handling described in Phase 1.
+> it stands and what to pick up first. **Amendments A1–A20 change the plan below** — read them
+> alongside it; A12 supersedes the measurement handling described in Phase 1, A16/A17 together
+> supersede most of Phase 2's harvest list, A18 supersedes Phase 3's, A19 adds the
+> on-device deployment, and A20 supersedes Phase 4's scheduling layer.
 
 ## Context
 
@@ -657,15 +659,377 @@ plausibly `R_var`, which at 0.5 V² assumes far more voltage noise than the data
 exercise on its own. The replay harness in `tools/replay.py` is what such a fit should be scored
 with. Worth doing before Phase 4 leans on this model, but it is not a refactor task.
 
+### A16 — actuators are declared on the component classes, not in `config_default`
+
+Applied 2026-08-01, before Phase 2. **Refines settled decision #5.** The rule is now: *a component
+class carries everything the Gateway needs to reach the hardware it describes.* Nothing about how
+to drive a device is written anywhere else — `config_default` declares no actuators at all.
+
+**Most of this is already true.** `_resolve_endpoint` derives `multiplus_mode`'s
+`{path: /Mode, on: 3, off: 4}` from `VictronMultiplusII.component_states`, not from the registry
+(A9), and the Gateway imports no component code (decision #6). What is left in
+`config_default.actuators` divides on one line — *device capability* vs *this installation's
+wiring*:
+
+| declared today in `config_default.actuators` | what it really is | goes to |
+|---|---|---|
+| `transport`, `state=` / `vedirect_set=` | this device model can be driven this way | **component class** |
+| VE.Direct `on=4, off=0` | register `0xEDAB`'s value space | **component class** |
+| write-VE.Direct / read-D-Bus asymmetry | `/Load/State` is read-only *on this model* | **component class** |
+| logical name, `description` | what this installation calls it, and why | config / instance kwarg |
+
+**The change.** A class-level `component_actuators` list, alongside the existing
+`component_states` / `vedirect_sets` (same pattern, same default `[]` on `DBusComponent` and
+`BaseAuxComponent`):
+
+```python
+class ActuatorType(NamedTuple):        # manufacturer/__init__.py
+    basename: str          # -> logical name f"{short_name}_{basename}"
+    write: dict            # {transport: 'vedirect', vedirect_set: 'load_control', on: 4, off: 0}
+    read: dict             # {transport: 'dbus', state: 'load_state'}
+    description: str = ""
+```
+
+It lives in `manufacturer/__init__.py`, not in `victron.py`, because the D-Bus components and the
+HTTP `aux_components` both declare actuators and discovery resolves both through one path.
+Declared on `VictronMultiplusII` (`mode`), `VictronSolarMPPTWithDCLoad` (`load`) and
+`TasmotaSmartPlug` (`relay`). `build_actuator_registry` walks `psystem` + `aux_components` instead
+of `config.actuators` and resolves each entry through the *unchanged* `_resolve_endpoint`;
+`config_default.actuators` is gone.
+
+**The emitted `system_configuration.yaml` is unchanged in shape** — same keys, same values, only
+the two Tasmota actuators renamed. That is the point: **Phase 2 is entirely unaffected**, so this
+cost nothing against the work that comes next. 59 tests still green.
+
+**Three constraints, each learned from something already in this plan:**
+
+1. **Declare explicitly; do not auto-derive actuators from `component_states`.** `mppt_mode` maps
+   `{0: "ideal", 1: "working", 4: "off"}` — no `"on"` label, so `_on_off_from_mapping` raises. A
+   rule like "every state with a mapping is an actuator" fails on the first non-binary one, and
+   would also silently expose every state as writable. The explicit list *is* the allowlist.
+2. **Names.** `multiplus_mode` and `mppt100_load` already read as `{short_name}_{basename}` and
+   fell out for free. `wallbox_charge` / `ac_inverter_plug` did not — one `TasmotaSmartPlug` class,
+   two different suffixes. Nothing consumes these names yet (Control is Phase 4), so both were
+   **renamed to `wallbox_relay` / `ac_inverter_relay`** rather than adding a per-instance override.
+   A8's actual requirement — that the actuator name not collide with the `ac_inverter` aux
+   component — still holds. Same reasoning applies to `description`: it is the device's
+   (`"Tasmota relay output"`), and what this installation wired it to is a comment in
+   `config_default`, which also lists the four resulting names.
+3. **This does not reopen A12.** `connector_R0` / `voltage_offset` describe the *cable between a
+   source and the clamps*, not the source, which is exactly why they were moved off the components
+   onto `Generic_Battery`. "All hardware config lives on the components" must not pull them back.
+   Same test: a Victron MPPT 100/20 has register `0xEDAB` wherever it is installed; it does not have
+   11 mΩ of cable.
+
+**Fell out with it:** `StateType.toggle_values` (three uses) existed only to feed `dbus_toggle`,
+which Phase 2 is dropping anyway. Once actuators declare on/off it had no readers — deleted.
+
+**Tests.** `test_discovery.py` pins the registry by *content* — `write["off"] != read["off"]`,
+on/off derived from the mapping, the Tasmota URL sourced from the aux component. All three intents
+survive verbatim. The two negative tests got *better* out of the move: they used to build a fake
+config object to inject a broken declaration, and now monkeypatch `component_actuators` on the
+class that would really carry it.
+
+### A17 — the resolved registry deleted most of the planned Phase-2 harvest
+
+Applied 2026-08-01, building Phase 2. The plan budgeted a large harvest from
+`ecowhen_data_api`; the actuator registry (decision #5, A16) makes over half of it dead on
+arrival, because **that repo's config file and this package's topology contract are the same
+information**, and only one of them is derived from the hardware.
+
+**Not harvested, and why:**
+
+| planned | why not |
+|---|---|
+| `config.py`'s 177 lines — `CommandEndpoint`, `DbusReadEndpoint`, `DbusToggleEndpoint`, `VeDirect*Endpoint` + their YAML parser | this *is* the registry, only hand-written. Discovery already emits transport, address, register and on/off, resolved off the live bus |
+| `_resolve_vedirect_port` | it read `system_configuration.yaml` to turn a component into `/dev/ttyUSB1`. Discovery now does that once, at the source |
+| `_handle_shell_command` + `CommandParam` validation | the Gateway runs no shell templates. Nothing in its job description needs one |
+| `_handle_vedirect_set`'s `allowed_values` check | the client sends a **boolean**. No integer from outside ever reaches hardware, so there is no untrusted value left to validate — and discovery already checked the registry's values against the register at startup |
+| `dbus_toggle` | as planned: read-modify-write cannot express "go to 3" |
+
+**Harvested as planned:** `auth.py` (verbatim, fails closed, env var renamed to `ECOPS_API_KEY`),
+`routes/files.py`, the `create_app` factory shape, and `_vregd` — VE.Direct stays a thin shell-out,
+not hand-rolled HEX.
+
+**File endpoints are derived, not configured.** `paths.py` already owns both roots, so the Gateway
+serves two fixed endpoints — `runtime` (RUNTIME_DIR) and `data` (DATA_DIR) — instead of naming them
+again in a YAML that could only ever drift. Both of `files.py`'s security checks survive verbatim:
+traversal guard, then allow-list.
+
+**Three things Phase 2 had to settle:**
+
+1. **A POST never reads back.** It reports the value it wrote and stops. A7 established that
+   convergence takes two ticks *on purpose* — confirming in the same breath as the write would
+   trust a value the device may not have applied. Reading back is the caller's next `GET`.
+2. **`on: null` is a real answer.** `/Load/State` reports `5` ("USER"), which is neither the on nor
+   the off value. The read route returns `{"value": 5, "on": null}`, and a service must treat that
+   as unknown and wait — the other half of A7's "an unknown readback waits rather than driving
+   blind". Collapsing it to `false` would drive the fan every tick.
+3. **Start order is not load-bearing.** The registry is re-read when `system_configuration.yaml`'s
+   mtime changes, so a Gateway started before the Power System — or one still holding addresses
+   from before a PS restart — recovers by itself. Before the first publish it answers 503 naming
+   the Power System, rather than 404 "no such actuator".
+
+**Two small moves out of Phase 1 code**, both so the Gateway does not have to import the Power
+System (which would drag in numpy, pytz and the whole component layer for the sake of 20 lines):
+`get_bus()` moved from `power_system_main` into `manufacturer/victron.py`, next to the other bus
+primitives, and `_read_number`/`_write_number` lost their underscore. They encode Victron BusItem
+conventions — empty-array-means-invalid, `SetValue` answers 0/−1 — which by A16's rule is exactly
+what belongs in a manufacturer module.
+
+**And one more application of A16:** `value_type` (the `vregd` type prefix, `un8`) was a config
+field in `ecowhen_data_api`. It is a property of the register, so it is now a field on
+`VeDirectSetType` and rides into the registry.
+
+**Not built, deliberately:** the REST endpoints for `mode_requests.json` and `control_config.yaml`.
+The Gateway is their producer per the shared-files table, but their schema is Control's, and
+Control does not exist yet. Building them now would be guessing at a contract Phase 4 defines.
+
+### A18 — `File_Logger` was harvested in behaviour, and the daily aggregates were wrong
+
+Applied 2026-08-01, building Phase 3.
+
+**`utils.py` is deleted.** It was harvested in Phase 1 in anticipation of this phase and held
+`File_Logger` plus two date helpers that nothing ever imported. `File_Logger`'s *behaviour* is
+what mattered and it is now `logger.CsvLogger` — rotation, dedup and growable columns — with three
+faults that did not survive the rewrite:
+
+- **Dedup off wrote nothing at all.** The condition was
+  `if logger_skip_no_changes and (data_changed or is_new_day)`, so setting `logger_skip_no_changes
+  = False` sent every sample down the "cache it, write nothing" branch. Never noticed because it
+  was never turned off. Now `if not skip_no_changes or changed or is_new_day`.
+- **An `UnboundLocalError` waiting for a quiet moment.** `now_str` is only bound when the data does
+  *not* already carry a `time` key, but the dedup branch printed it unconditionally — and `sim_row`
+  did carry `time`. It never fired only because SOC drifts every step, so two consecutive simulator
+  rows were never equal.
+- A `print("... {now_str} ...")` that was missing its `f`.
+
+**What was worth keeping exactly:** the dedup holds back the *last* unchanged row and flushes it
+when the value finally changes, so a plateau records both when it started and when it ended. Drop
+that and a steady reading is indistinguishable from a dead logger. Pinned by
+`test_identical_samples_collapse_but_the_plateau_keeps_its_end`.
+
+**The column split is derived from the contract, not enumerated.** `log_` columns are the poll
+map's variables plus the packed state code; `aux_` columns are the aux components' declared
+variables; **`sim_` is the residue** — anything in `state.json` that is none of those and not one
+of seven named Control-facing keys. That is why A12's three new `battery/*` keys reached the CSV
+without anyone maintaining a column list, and why the next estimator output will too.
+
+#### The aggregation differential — the predecessor was wrong on three days
+
+The new `DailyAggregator` was run over the predecessor's own `log_*.csv` / `aux_*.csv` and its
+output diffed against its own `daily.csv`. **151 days.** Six of the eight columns —
+`AC_power_output`, both aux energies, and all three max/min — are **exactly 0.000000** different.
+The two that move do so on three days, and in every case the new number is the correct one:
+
+| day | column | cause |
+|---|---|---|
+| 26-06-27, 26-06-29 | `solar_total` (+2.23, +0.25 kWh) | `aux_*.csv` contains **one row of NUL bytes** — a power cut mid-write. The predecessor's aggregator threw the whole day away over that one sample, leaving the aux energies blank *and* dropping the Deye's output from `solar_total`. `_integrate` now skips the unparseable row and integrates across the gap |
+| 26-06-25 | `DC_load_power` (+0.0158 kWh) | the day was aggregated **while it was still running**. `update_daily_aggregates` builds its date list with `range(1, time_delta.days)`, which is *empty* on a normal one-day rollover — so days were only ever aggregated by the full rebuild, and one caught mid-evening was never recomputed. Reconstructed exactly: the old row matches this day truncated at 21:13, where solar had already finished (hence `solar_total` matched) but the fan ran on for another 2.7 h |
+
+`DailyAggregator` cannot reproduce either: it aggregates only dates *strictly before today*, records
+which dates it has written, and survives a corrupt row. `test_each_completed_day_is_aggregated_exactly_once`
+and `test_one_corrupt_row_does_not_cost_the_whole_day` pin both.
+
+**Also changed deliberately:** a day with no readings gets an empty max/min cell rather than the
+predecessor's `-inf` / `inf`, which is not a temperature.
+
+### A19 — parallel deployment, and the two flags that make it an interlock
+
+Added 2026-08-01, before Phase 4. `deploy/` — `push.sh`, `install.sh`, `start.sh`,
+`config.sh`, `compare.py`, and a README. See that README for the procedure; what matters
+to the plan is *why the shape is what it is*.
+
+**The plan claims phases 1–3 can run beside the live system because they are read-only.
+That was not quite true.** Two paths write:
+
+- `discovery.startup_sequence()` wakes the Multiplus by writing `/Mode` (A11). It only
+  fires when the DC measurements are missing, which will not normally happen with the old
+  system running — but "will not normally happen" is not a safety property. It would pulse
+  AC output underneath a live system.
+- The Gateway writes whenever commanded, and it is on the network.
+
+Both are now switchable, and `ECOPS_PARALLEL=1` (the default) sets them:
+
+| flag | effect |
+|---|---|
+| `ecops-power-system --no-startup-sequence` | the process cannot write D-Bus at all |
+| `ecops-gateway --read-only` | every `POST /actuators/...` is a 403; reads unaffected |
+
+Structural, not a promise to remember. Pinned by `test_read_only_discovery_never_writes_the_bus`
+and `test_read_only_refuses_actuation_but_still_reads`.
+
+**Collisions with the predecessor, all separated:** its REST API binds **5100**
+(`api_config.yml`), so the Gateway takes **5101**; separate project dir, separate `data/`
+(absolute, so it never resolves against a process's CWD), tmpfs for the contracts, and the
+tmux session is `ecops` rather than `victron`. The one accepted cost is that the two Tasmota
+plugs and the Deye get polled by both systems.
+
+**Deployment follows the predecessor's proven recipe** — `uv venv --system-site-packages
+--python /usr/bin/python3` — but *not* for the reason first assumed, and the difference
+broke the first install on the device:
+
+- **`pydbus` is pure Python** (`py2.py3-none-any.whl`, no compiled parts) and comes from
+  PyPI, into the venv.
+- **`gi` (PyGObject) is the OS package** — compiled against the system libraries, reachable
+  only through `--system-site-packages`.
+
+The predecessor lists `pydbus` as a **hard dependency**, so a plain `uv sync` installs it
+without anyone thinking about it. Here it is an *optional* `device` extra, precisely so the
+suite installs off-device (A3) — so `uv sync --no-dev` silently left it out and
+`import pydbus` failed. `install.sh` now syncs `--extra device`, and every `uv run` in
+`start.sh` passes it too.
+
+The check is **two checks**, because `import pydbus` imports `gi` and one test cannot tell
+the failures apart: `No module named 'pydbus'` means the extra is missing;
+`No module named 'gi'` means the venv cannot see the OS bindings. The first version of the
+script swallowed the real error into `2>/dev/null` and printed a generic warning, which is
+exactly the wrong thing to do at the one moment the message matters.
+
+**The second failure was worse, and `.python-version` was the cause.** With `gi` still
+unimportable after the extra was fixed, the mechanism turned out to be that **`uv sync`
+silently destroys and rebuilds `.venv` on a different interpreter** whenever something asks
+for one — and a `.python-version` file is enough. The rebuilt venv loses
+`--system-site-packages`, and with it the only route to the OS `gi`. Reproduced exactly on
+a machine whose system python is 3.12.3 with PyGObject:
+
+```
+with .python-version=3.13:   uv venv -> 3.12.3, system-site=true
+                             uv sync -> 3.13.1, system-site=false    -> no gi
+without it:                  uv venv -> 3.12.3, system-site=true
+                             uv sync -> 3.12.3, system-site=true     -> gi OK, pydbus OK
+```
+
+`.python-version` is therefore **deleted** — `requires-python = ">=3.12"` is the real
+constraint and is sufficient. `UV_PYTHON_DOWNLOADS=never` is *not* a fix: uv reuses a
+cached managed interpreter, tested and confirmed. `install.sh` now asserts after the sync
+that the venv still has `include-system-site-packages = true` and fails loudly if not,
+because the event is otherwise invisible — it leaves nothing behind except a venv that
+cannot import `gi`.
+
+The predecessor has the same `.python-version` and is unaffected only because its venv
+predates it and uv leaves a satisfying venv alone. Nothing about that is a property anyone
+should rely on.
+
+`deploy/doctor.sh` exists for this class of problem: it prints the OS python and its `gi`,
+uv's settings, and **this venv's `pyvenv.cfg` beside the predecessor's working one** — the
+comparison that makes any of these visible in one round trip rather than ten.
+
+The boot hook goes in `/data/rc.local`, which Venus OS keeps across firmware updates.
+
+**`compare.py` is the point of the exercise** — Phase 1's verification has only ever been
+run key-by-key off a fake bus. It handles the three ways the contract legitimately differs:
+`system/battery_voltage` / `system/battery_current` are compared **across the A12 rename**
+to `battery/voltage` / `battery/current`; the six per-component `DC_0_*` keys changed
+meaning in place and are reported separately with the reason; and the packed `state` code is
+**positional and grew from 6 to 12 digits** when A10 added three DS18B20 sensors — found
+while testing the script, and not something the key-level differential could ever have seen.
+It also prints how far apart the two samples are, because nothing else in the output means
+anything without it.
+
+### A20 — an agent asks for a mode, and that deleted the whole scheduling layer
+
+Applied 2026-08-01, building Phase 4. **Supersedes the parts of the Phase 4 harvest list
+that name `schedule.py` and the `ScheduledAction` dispatch path.**
+
+The plan budgeted `schedule.py` (`ScheduledAction`, `Schedule`, `is_due`) into Phase 4. It
+is not harvested, and the reason is the same one that deleted half of Phase 2's list
+(A17): **the mode graph is the same information, expressed once**. An agent now returns
+`ModeRequest(mode, active, agent, reason)` and nothing else — no actuator, no value, no
+ordering, no time.
+
+| planned | why not |
+|---|---|
+| `ScheduledAction` + `Schedule.due_now` | a request is *level-triggered*. "Am I inside a solar window" is asked every cycle instead of latched at a boundary |
+| `is_due(window_seconds=30)` | the +-30 s firing window only ever worked by accident. `wallbox_optimal_charge` carried a nine-line comment explaining that `execute_at` had to be `now` and never the real hour boundary, because a 5-minute planning cycle would miss a 60-second window and the intent would *silently never fire*. There is no firing moment left to miss |
+| `SequenceIntent` / `sequences/` | as planned: `required_services` is the step list, and the teardown falls out of it instead of being written backwards in a second file |
+| `control/agents/time_based.py` | its `run()` returned `rationale="not yet implemented"`. Ported nothing, so it ported nothing |
+
+**Safety keeps a direct path, and only safety.** `AgentResult` carries three kinds of
+intent: `requests` (modes), `commands` (immediate actuator writes) and `inhibit` (a reason
+string). A breach does both of the last two — it commands the cut *and* inhibits the
+coordinator — because switching the inverter off while the wallbox mode still wants it on
+would have the two fight every tick. Inhibit drops every requester, modes deactivate, and
+services with nothing left requiring them revert on their own.
+
+**Cooling became a mode, which is where reference counting finally earns its keep.** The
+fan is `mppt100_load`, and *two* things want it: the wallbox (for the hours of DC load it
+implies) and the safety agent's cooling rule (AC load over 1000 W for `n_req` cycles). The
+predecessor wrote the fan directly from `switch_on_DC_load`, so whichever of the two
+finished last switched it off underneath the other. `cooling` is now a `ServiceOnlyMode`
+— a mode that *is* its requirements, with no actuator of its own — and the fan stays up
+until both let go. Pinned by `test_the_fan_stays_up_while_cooling_still_wants_it`.
+
+**A design fault found the same way A7's two were.** Slow agents run on the planning
+interval (5 min); the coordinator recomputes wants **every** tick (60 s) and treats silence
+as release. Straight through, that meant a forecast agent's window was requested on one
+tick and dropped on the next four. The runner therefore *holds* the planning agents' last
+requests and re-submits them each tick, and the fast agents' requests are the only ones
+recomputed per cycle. `test_a_planning_agents_request_survives_the_ticks_between_planning_cycles`
+exists because nothing about the output looks wrong when this regresses — the wallbox just
+flickers.
+
+**Both named bugs are gone, and neither was "fixed":**
+
+- **Bug #2** — `is_enabled` is now two flags and one `return`: disabled only when
+  `enabled is False and confirmed_disable is True`. The runner *calls* it, and says so
+  loudly in the log when the answer is no. The REST surface enforces the same rule on the
+  way in, so the protection exists in both places rather than only in CLAUDE.md.
+- **Bug #3** — `from_dict` has no literal fallbacks left anywhere. `_FromDict` filters
+  unknown keys and lets the dataclass supply every default, so 24-vs-96 and 200-vs-20
+  cannot recur. `test_from_dict_does_not_invent_its_own_defaults` asserts
+  `ControlConfig.from_dict({}) == ControlConfig()`.
+
+**One behaviour statement, made a knob rather than a constant.** A service reverts to
+`default_on` when nothing requires it, and both default to **off** — so starting Control
+switches the Multiplus off unless a mode wants it. That *is* the declarative model, and it
+is exactly what the predecessor's `wallbox_off` sequence did by hand. It is also the single
+setting that changes what happens on an otherwise idle system, which is why it is
+`services.ac_inverter_default_on` / `services.fan_default_on` in the config and not a
+literal in `actuation.py`.
+
+**The battery is not restated.** `ControlConfig.battery` defaults *are*
+`config_default.battery` — capacity, cell type, the Thevenin terms, and the safety limits
+A10 already derives from `n_cells x` the cell spec. Only `max_ac_load_w` is declared here,
+because 2500 W is the Multiplus's AC rating and not a property of the pack. Consequence:
+the limits moved slightly against the predecessor's hand-typed ones (24.0 V not 24.3,
+28.8 V not 28.9, 45 °C not 42.5) — derived from the cell spec, as A10 intended.
+
+**A12 landed where it was aimed.** `control/state.py` reads `battery/voltage` and
+`battery/current`, the derived clamp values. `system/battery_voltage` is now a raw terminal
+reading and Control does not touch it. This was the "Phase 3/4 note" in A12, and it is
+discharged.
+
+**The Gateway gained `/control/*`** — the endpoints A17 deliberately did not build because
+their schema was Control's and Control did not exist. `POST /control/modes/<name>/activate`
+writes the durable `mode_requests.json`; `GET /control/modes|/services` serve what Control
+published; `PUT /control/config` deep-merges into `control_config.yaml` with the safety
+guard and the wallbox-agent-group exclusivity. Two properties carried over from the
+actuator routes on purpose: a status file that does not exist yet answers **503 naming
+Control**, never 404; and `--read-only` (A19) refuses mode and config changes as well as
+actuation, because both would cause a write the moment Control looked.
+
+**`deploy/start.sh` starts Control only in full-control mode.** In parallel mode the
+Gateway 403s its every POST anyway, so it would log failures and nothing else — and the
+moment the interlock lifted it would begin actuating with no further ceremony. Phase 4 is
+the exclusive step; the start script now says so structurally.
+
 ---
 
 # Implementation status
 
-**Phase 1 complete**, plus the A12/A13 revisions applied on 2026-07-31. 59 tests, green, no warnings.
+**All four phases complete.** A12/A13 applied 2026-07-31; A16/A17/A18, the Gateway and the
+Logger on 2026-08-01, plus A19's deployment; A20 and Control the same day. 136 tests, green,
+no warnings.
 
 ```
-uv run python -m pytest tests/      # 59 passed
+uv run python -m pytest tests/      # 136 passed
 ```
+
+**Phases 1–3 have run on the device**, in parallel read-only mode beside the live
+predecessor (2026-08-01). See [Device validation](#device-validation--phases-13-in-parallel-mode)
+below for what that did and did not settle. **Phase 4 has not**, and cannot until the
+cutover: it is the exclusive step.
 
 ## What Phase 1 delivered
 
@@ -705,25 +1069,177 @@ Phase 2, the Gateway's actuation — be tested off-device.
      changed the *meaning* of `system/battery_voltage` and every `mppt*/DC_0_voltage` back to the raw
      reading. The key-level differential above therefore no longer covers those; re-run it against the
      device with A12's mapping in mind.
-3. **Actuator registry resolves**: `multiplus_mode`, `mppt100_load`, `wallbox_charge`,
-   `ac_inverter_plug` — with `multiplus_mode.write` = `{dbus, com.victronenergy.vebus.ttyUSB2,
-   /Mode, on: 3, off: 4}`, derived from the component mapping, not restated.
+3. **Actuator registry resolves**: `multiplus_mode`, `mppt100_load`, `wallbox_relay`,
+   `ac_inverter_relay` — with `multiplus_mode.write` = `{dbus, com.victronenergy.vebus.ttyUSB2,
+   /Mode, on: 3, off: 4}`, derived from the component mapping, not restated. Since A16 the
+   declaration itself lives on the component class.
 
-**Still outstanding from the plan's Phase 1 verification:** the differential has only been run
-key-by-key off a fake bus. Running the new Power System *beside the live logger on the device* and
-diffing values (not just key names) has not been done — it needs the hardware.
+4. **On the device, beside the live predecessor** — see [Device validation](#device-validation--phases-13-in-parallel-mode).
+   What parallel mode structurally could *not* exercise: the A11 startup sequence, which is
+   switched off by `--no-startup-sequence` there.
 
-## Pick up here (Phase 2 — Gateway)
+## What Phase 2 delivered
 
-Per the plan above, plus what Phase 1 learned:
-- The registry is already resolved and waiting in `system_configuration.yaml`; the Gateway consumes
-  it and imports no component code.
-- `dbus_toggle` is **not** being ported — the Gateway needs `dbus_set`, `tasmota_set`, and it keeps
-  `dbus_read` for verify-readback (decision #3).
-- Harvest from `../ecowhen_data_api` (37 tests, green): `auth.py`, `routes/files.py`, `app.py`,
-  the endpoint dataclasses, and `_handle_dbus_read` / `_handle_vedirect_*` / `_vregd`.
-- **A9 is a live trap for the Gateway**: `mppt100_load` writes VE.Direct and reads D-Bus, with
-  different integers for "off". The registry already models this; the Gateway must honour both halves.
+**② Gateway** — the sole hardware writer, runs end-to-end.
+
+| File | Role |
+|---|---|
+| `gateway/app.py` | factory, `check_api_key` (harvested, fails closed), `ActuatorRegistry` (mtime-reloading), lazy bus |
+| `gateway/transports.py` | the three ways to reach hardware — D-Bus via pydbus, VE.Direct via `vregd`, Tasmota via HTTP with fallback. Each is read/write over a resolved endpoint and knows nothing else |
+| `gateway/actuators.py` | `GET /actuators/`, `GET /actuators/<name>`, `POST /actuators/<name>` with `{"on": bool}` |
+| `gateway/files.py` | harvested file serving, endpoints derived from `paths.py` (A17) |
+| `gateway_main.py` | the process; `ecops-gateway [--host] [--port]` |
+
+**Tests** — 21 in `test_gateway.py`, all off-device. The D-Bus half runs against the same `FakeBus`
+the Power System uses, so a `POST` is observable as a changed value on the bus; `vregd` and HTTP are
+stubbed at exactly that boundary and no further, leaving the registry lookup, on/off resolution and
+route logic real in every test. **Bug #1's failure mode is pinned**: an unreachable Tasmota plug is
+a 502, never a silent no-op.
+
+**Phase 2 verification results.** A real Flask server against a fake bus, driven over HTTP:
+`GET /actuators/` enumerates the four names; `POST multiplus_mode {"on": false}` answers
+`value_written: 4` and `/Mode` on the bus **changes 3 → 4**; the following `GET` reads back
+`{"value": 4, "on": false}`; `GET /files/runtime/` lists the contract.
+
+**On the device it has only served reads.** It ran in parallel mode, where `--read-only`
+answers every `POST /actuators/...` with a 403 — by design, since the predecessor still owned
+the hardware. So the registry, the routes, the auth and the D-Bus *read* path are proven on
+real hardware; **`vregd` and the Tasmota write path have still never run**, on device or off.
+They are exercised for the first time at the cutover.
+
+## What Phase 3 delivered
+
+**③ Logger** — a pure sink; nothing reads what it writes.
+
+| File | Role |
+|---|---|
+| `logger.py` | `split_state` (contract-driven column split), `CsvLogger` (daily rotation, dedup with plateau-end, growable columns), `StateLogger` (the three files) |
+| `aggregation.py` | `daily.csv` — time-weighted energies, derived `DC_load_power`, per-day max/min, idempotent per date |
+| `logger_main.py` | the process: watch `state.json`, one row per new poll; `ecops-logger --once` |
+
+**Tests** — 20 in `test_logger.py`. `utils.py` deleted (A18).
+
+## Phase 3 verification results
+
+1. **The daily aggregates, differentially against 151 real days.** Six of eight columns exactly
+   `0.000000`; the three days that differ are all the predecessor being wrong. See A18 — this is
+   the strongest verification any phase has had, because the *inputs* were byte-identical.
+2. **End to end, real Power System into real Logger** (fake bus, 8 polls across midnight): both
+   days' files created, rotation correct, and the held-back plateau row landed in the **previous**
+   day's file where it belongs.
+3. **Column comparison against the live device's CSVs:**
+   - `aux_*.csv` header **byte-identical**.
+   - `log_*.csv` — **0 of the 21 live columns lost**, 3 added (`DS18B20_*/temperature`, A10).
+   - `sim_*.csv` — deliberately different, exactly as A12 said: the per-component "corrected"
+     values are gone, replaced by `battery/voltage`, `battery/current`, `battery/voltage_spread`,
+     plus `time_to_low_battery`. Anything reading the old sim columns must be repointed.
+
+## Device validation — phases 1–3, in parallel mode
+
+Run on the Venus OS box on 2026-08-01, beside the live predecessor, with the default
+`ECOPS_PARALLEL=1` interlock: `ecops-power-system --no-startup-sequence` and
+`ecops-gateway --read-only`. **All three processes work.** The A19 deployment recipe holds
+on the real box — the venv keeps `--system-site-packages`, `gi` and `pydbus` both import,
+and the two contracts appear where `paths.py` says.
+
+**The differential.** `deploy/compare.py` against the predecessor's live `state.json` came
+out clean apart from `SOC_counted`, which differs — and that difference is **structural, not
+a fault**:
+
+> Coulomb counting is path-dependent. The new estimator seeds itself from open-circuit
+> voltage at *its own* start (`battery_simulation.estimate_initial_SOC`) and integrates from
+> there; the predecessor's count has been integrating for weeks from a different seed, over
+> a period that includes the 210 → 310 Ah capacity change (A14). The two numbers are answers
+> to different questions and there is no reason for them to agree.
+
+**Consequence for any future differential:** `SOC_counted` is not a comparable quantity
+between two independently-started systems. `SOC_Kf` is — the filter's measurement update
+pulls it toward the OCV-implied SOC every step, so two correct filters over the same battery
+must converge regardless of where each started, most tightly at rest points. Compare that,
+or compare at an anchor (A14), and treat a `SOC_counted` gap as information about the seeds
+rather than about the code.
+
+**What this settles:** the bus walk and the poll map against real Victron services, the aux
+HTTP polling, the estimator running for real over live readings, the Logger's files, the
+Gateway's registry/auth/read path, and the deployment.
+
+**What it structurally could not settle**, because parallel mode exists precisely to prevent
+it: the A11 startup sequence (switched off), the Gateway's `vregd` and Tasmota **write**
+transports (403), and Control (not started there — A20). All three run for the first time at
+the cutover, which is why the cutover is the one step to watch closely.
+
+## What Phase 4 delivered
+
+**④ Control** — the brain. No hardware, no D-Bus, no file it also reads back.
+
+| File | Role |
+|---|---|
+| `control/config.py` | the durable knobs; battery defaults *are* `config_default.battery`; one clock (`TZ`, `now()`) so nothing ever compares a naive datetime against the contract's |
+| `control/state.py` | `state.json` → `CurrentState`; A12's derived clamp values; a stale timestamp raises (A20) |
+| `control/forecast.py` | harvested; parsed times localised at the boundary |
+| `control/projection.py` | harvested; projects with `Battery_Simulation`, configured from `ControlConfig` |
+| `control/gateway_client.py` | `command(actuator, on)` / `read(actuator)`. The only actuation path out of this process |
+| `control/actuation.py` | the concrete `ac_inverter` / `fan` services and `wallbox` / `cooling` modes — everything hardware-shaped, and it is 90 lines |
+| `control/agents/` | `system_safety` (bug #2 gone), `soc_wallbox_charge`, `forecast_wallbox`, `wallbox_optimal_charge`. The planning algorithms harvested verbatim; only their output changed (A20) |
+| `control/decision_log.py` | harvested; the cycle entry now carries the coordinator's view |
+| `control_main.py` | the process: reload → read → safety → project → agents → tick. `--once`, `--dry-run` |
+| `gateway/control.py` | the REST surface A17 deferred: modes, services, requests, config, log |
+
+**Tests** — 34: 27 in `test_control.py`, 7 more in `test_gateway.py` for `/control/*`.
+`service.py` / `mode.py` / `coordinator.py` and their 18 spike tests shipped **unchanged** —
+the spike's whole purpose, and it held.
+
+## Phase 4 verification results
+
+1. **The plan's round trip, end to end and off-device.** Real Control → real HTTP routing →
+   real Gateway → the real registry → the fake bus with `vregd` and Tasmota stubbed at the
+   protocol boundary. `POST /control/modes/wallbox/activate` → `/Mode` on the bus goes
+   **4 → 3**, `/Load/State` **1 → 4**, the wallbox plug reports ON, and
+   `services_status.json` shows both services `satisfied`. Deactivate puts all three back —
+   and `/Load/State` returns to **1**, not the **0** that was written, which is A9's
+   asymmetry surviving a full round trip through four layers.
+2. **The actuator names are pinned by that test.** It is the first thing that consumes
+   `wallbox_relay` and `mppt100_load` as *names*; A16 renamed them freely precisely because
+   nothing did yet.
+3. **`grep -rn "dbus-send\|pydbus" control/`** matches only two docstrings that quote the
+   check. No code.
+4. **`ecops-control --dry-run` against a hand-written `state.json`** — read state, project
+   96 h, run every agent, print what each would ask for, command nothing. Exit 0.
+
+**Still outstanding:** none of Phase 4 has run against the real hardware, and unlike phases
+1–3 it *cannot* be validated beside the predecessor. The cutover is its first run.
+
+## Pick up here
+
+Phases 1–3 are validated on the device (above). What is left is the one exclusive step, and
+it is the only one in the whole rebuild that can break something physical.
+
+**The cutover.** Stop the predecessor's `control_runner.py` — and confirm it is stopped, not
+merely quiet — then `ECOPS_PARALLEL=0 ./deploy/start.sh --restart`, which is what brings
+Control up at all (A20). Two writers on one actuator is the one genuinely dangerous failure
+mode in this rebuild. Revert = kill the `ecops` session, restart the old runner.
+
+**Four things run for the first time in that first minute**, so watch them in this order:
+
+1. **The A11 startup sequence**, if the Multiplus's DC measurements are missing — it wakes the
+   inverter, which energises AC output for a few seconds. The 5 s / 10 s waits are still a
+   guess; they are class attributes on `VictronMultiplusII`, tunable without touching logic.
+2. **`vregd`** — the fan's VE.Direct write, and the one place `int(token, 0)` parses the
+   output of a tool that has never been run. `POST /actuators/mppt100_load {"on": true}` by
+   hand, then `GET` it back: the write is `4`, the readback should be `4`, and off writes `0`
+   but reads `1` (A9). A 502 here is the transport talking, not the fan.
+3. **The Tasmota write path** — same, by hand, on `wallbox_relay`. Bug #1's failure mode is
+   that this silently does nothing; the Gateway now answers 502 instead, so believe the code.
+4. **Control's first tick**, which will switch the Multiplus **off** if no mode wants it. That
+   is the model, not a fault (A20) — decide whether this installation wants
+   `services.ac_inverter_default_on: true` *before* starting it, not after.
+
+Only then let it run unattended: `GET /control/modes` and `/control/services` say what it
+thinks it is doing, and `data/control_log.jsonl` says why.
+
+**Worth doing before Control leans on the model:** A15's `R1` calibration pass, against
+`tools/replay.py` — and it can now be scored against this system's *own* recorded CSVs
+rather than the predecessor's. The projection is a live input to the wallbox agents.
 
 ## Carried risks
 
@@ -733,18 +1249,38 @@ Per the plan above, plus what Phase 1 learned:
   replaced, but still the largest single lever on coulomb-counting accuracy.
 - **A12 changed the state contract's meaning, not just its keys.** `system/battery_voltage` and the
   per-component `DC_0_voltage` keys are now raw readings; the derived clamp values live under
-  `battery/*`. Nothing consumes them yet — Phase 3 and 4 must not carry over the old assumption.
-- **Three of the four `ecops-*` entrypoints still point at modules that do not exist**
-  (`gateway_main.py`, `logger_main.py`, `control_main.py`). `uv sync` does not validate script
-  targets, so this stays latent until someone runs one. Phases 2–4 each create one.
+  `battery/*`. Control reads `battery/*` (A20); the Logger writes both.
+- **Control switches the Multiplus off when no mode wants it** (A20). That is the declarative
+  model working as designed, and it is what the predecessor's `wallbox_off` did — but it is a
+  behaviour change on an idle system, and the first minute of full-control mode is when it
+  shows. `services.ac_inverter_default_on` is the knob if this installation wants otherwise.
+- **The mode graph has never converged against real hardware latency.** The services retry five
+  times and then sit in `failed`; whether a real Multiplus reflects `/Mode` inside five 60-second
+  ticks is exactly the kind of thing only the device can answer (compare A11's 5 s/10 s guesses).
+- **The Gateway's `vregd` and Tasmota *write* transports have still only been stubbed.** The
+  device run did not change this and could not: `--read-only` 403s every POST, which is the
+  whole point of parallel mode. The VE.Direct output parse (`int(token, 0)` off `vregd -g`) and
+  the Tasmota `{"POWER": "ON"}` answer remain assumptions about tools nobody has run. First
+  thing to check by hand at the cutover.
+- **`ECOPS_API_KEY` must be set** or the Gateway refuses every request with a 503. That is the
+  harvested fail-closed behaviour and it is correct, but it is a new deployment requirement —
+  and since A20 it is Control's requirement too: `GatewayClient` reads the same variable, so an
+  unset key makes every command fail and every readback come back unknown.
+- **The solar forecast needs `ECOWHEN_DATA_API_KEY`** (a *different* key, for computepi's data
+  API). Without it the fetch 401s, `forecast` is None, and the two forecast agents report
+  "inactive" — quietly correct, but it looks like they are disabled.
 - **No initial commit yet.** Left deliberately — not committing without being asked.
 - **`running_since` changed format**, from `"26-07-07 00:29"` to ISO. Same key, so the key-level
-  differential did not flag it. Nothing was found reading it, but Phase 3/4 should confirm.
-- **The differential compares key names, not values.** See above — real validation needs the device.
+  differential did not flag it. Nothing was found reading it; nothing in Phases 3–4 reads it.
+- **`SOC_counted` does not match the predecessor's, and never will.** Seen on the device and
+  expected: the count is path-dependent from whatever seed each system started with. Not a
+  defect, but it means SOC cannot be differentially validated that way — compare `SOC_Kf`, or
+  compare at a rest anchor (A14).
 - **`phoenix` will now fail startup if it is ever plugged in** (A5, retargeted by A12). That is
   intended, and the error says which cable to measure, but it is a behaviour change from the
   predecessor, which would instead have crashed on every poll.
-- **The startup sequence has only been exercised against the fake bus** (A11). The 5 s / 10 s waits
+- **The startup sequence has still only been exercised against the fake bus** (A11) — parallel
+  mode runs the Power System with `--no-startup-sequence`, so the device run skipped it. The 5 s / 10 s waits
   are a guess at how long a real Multiplus takes to bring its DC measurement hardware up; they are
   class attributes on `VictronMultiplusII` so they can be tuned on the device without touching logic.
   Whether the measurements *stay* readable after the inverter is stopped again — the assumption the
