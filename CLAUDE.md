@@ -257,9 +257,9 @@ Four things run for the first time in that first minute. Watch them in this orde
    the transport talking, not the fan.
 3. **The Tasmota write path** — same, by hand, on `wallbox_relay`. Its old failure mode was
    silently doing nothing; the Gateway answers 502 instead, so believe the code.
-4. **Control's first tick**, which switches the Multiplus **off** if no mode wants it. Decide
-   whether this installation wants `services.ac_inverter_default_on: true` *before* starting,
-   not after.
+4. **Control's first tick**, which switches the Multiplus **off** if no mode wants it. That is
+   correct for this installation — `services.ac_inverter_default_on: false` is intended, not a
+   default nobody looked at. Expect the inverter to go off, and do not read it as a fault.
 
 Then let it run: `GET /control/modes`, `/control/services` and `/control/schedule` say what it
 thinks it is doing, and `data/control_log.jsonl` says why.
@@ -271,9 +271,10 @@ thinks it is doing, and `data/control_log.jsonl` says why.
 - **Capacity is configured at 310 Ah; the recorded data measures ~288 Ah.**
 - **`SOC_counted` is path-dependent** and will never match another independently-started
   system. Compare `SOC_Kf`, or compare at a rest anchor.
-- **Control switches the Multiplus off when no mode wants it.** That is the model working, and
-  it is what the predecessor's `wallbox_off` did by hand — but it is a behaviour change on an
-  idle system. `services.ac_inverter_default_on` is the knob.
+- **Control switches the Multiplus off when no mode wants it** — confirmed as the wanted
+  behaviour for this installation, so `services.ac_inverter_default_on` stays `false`. It is
+  still the one setting that changes what an otherwise idle system does, which is why it is a
+  knob rather than a literal in `actuation.py`.
 - **The Gateway's `vregd` and Tasmota *write* transports have never run**, on device or off —
   parallel mode 403s every POST. The VE.Direct output parse and the Tasmota `{"POWER": "ON"}`
   answer are assumptions about tools nobody has executed. Check by hand at the cutover.
