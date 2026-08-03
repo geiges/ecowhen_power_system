@@ -2,7 +2,10 @@
 import pytest
 
 from ecowhen_power_system import config_default, discovery
-from ecowhen_power_system.manufacturer.victron import VictronMultiplusII
+from ecowhen_power_system.manufacturer import ActuatorType
+from ecowhen_power_system.manufacturer.victron import (VictronMultiplusII,
+                                                       VictronSolarMPPT,
+                                                       VictronSolarMPPTWithDCLoad)
 
 from conftest import MPPT100, MULTIPLUS, FakeBus, phoenix_service
 
@@ -90,7 +93,7 @@ def test_dbus_actuator_derives_on_off_from_the_component_mapping(system_config):
 
 
 def test_fan_actuator_is_asymmetric_write_vedirect_read_dbus(system_config):
-    """The one actuator whose read and write disagree — see config_default.actuators.
+    """The one actuator whose read and write disagree — see VictronSolarMPPTWithDCLoad.
 
     Writing "off" is register value 0; reading "off" comes back as /Load/State == 1.
     If these ever collapse to one number the reconcile loop will flap the fan, so
@@ -103,6 +106,7 @@ def test_fan_actuator_is_asymmetric_write_vedirect_read_dbus(system_config):
         "component": "mppt100",
         "port": "/dev/ttyUSB1",
         "register": 0xEDAB,
+        "value_type": "un8",
         "on": 4,
         "off": 0,
     }
@@ -122,12 +126,12 @@ def test_tasmota_actuator_takes_its_url_from_the_aux_component(system_config):
     """
     aux = {c.short_name: c for c in config_default.aux_components}
 
-    wallbox = system_config["actuators"]["wallbox_charge"]
+    wallbox = system_config["actuators"]["wallbox_relay"]
     assert wallbox["write"]["url"] == aux["wallbox"].url
     assert wallbox["write"]["fallback_url"] == aux["wallbox"].fallback_url
     assert (wallbox["write"]["on"], wallbox["write"]["off"]) == (1, 0)
 
-    ac_cut = system_config["actuators"]["ac_inverter_plug"]
+    ac_cut = system_config["actuators"]["ac_inverter_relay"]
     assert ac_cut["write"]["url"] == aux["ac_inverter"].url
     assert ac_cut["write"]["url"] != wallbox["write"]["url"]
 
@@ -141,7 +145,7 @@ def test_missing_component_yields_an_unavailable_actuator_not_a_missing_one(bus_
     act = config["actuators"]["multiplus_mode"]
     assert act["available"] is False
     assert "write" not in act          # no address to offer
-    assert "wallbox_charge" in config["actuators"]   # unrelated actuators survive
+    assert "wallbox_relay" in config["actuators"]   # unrelated actuators survive
 
 
 def test_startup_wakes_a_multiplus_with_dead_measurement_hardware(bus_values, fast_wake):
@@ -187,40 +191,44 @@ def test_contract_round_trips_through_yaml(system_config, tmp_path):
     assert discovery.load_system_configuration(path) == system_config
 
 
-def test_state_without_on_off_labels_cannot_back_an_actuator(fake_bus):
-    """tracking_state maps {0: 'off', 3: 'bulk', ...} — no "on", so it is not binary."""
-    broken = dict(config_default.actuators)
-    broken["bogus"] = dict(
-        description="tracking_state is not a binary actuator",
-        component="mppt150",
-        write=dict(transport="dbus", state="tracking_state"),
-        read=dict(transport="dbus", state="tracking_state"),
-    )
+def test_state_without_on_off_labels_cannot_back_an_actuator(fake_bus, monkeypatch):
+    """tracking_state maps {0: 'off', 3: 'bulk', ...} — no "on", so it is not binary.
 
-    class Cfg:
-        system_components = config_default.system_components
-        battery = config_default.battery
-        aux_components = config_default.aux_components
-        actuators = broken
+    Which is why a component declares its actuators explicitly instead of every state
+    carrying a mapping becoming one: most states are readings, not switches.
+    """
+    monkeypatch.setattr(VictronSolarMPPT, "component_actuators", [
+        ActuatorType(
+            basename="bogus",
+            description="tracking_state is not a binary actuator",
+            write=dict(transport="dbus", state="tracking_state"),
+            read=dict(transport="dbus", state="tracking_state"),
+        ),
+    ])
 
     with pytest.raises(ValueError, match="no 'on'/'off' labels"):
-        discovery.discover(fake_bus, Cfg)
+        discovery.discover(fake_bus, config_default)
 
 
-def test_vedirect_write_value_must_be_allowed_by_the_register(fake_bus):
-    broken = dict(config_default.actuators)
-    broken["mppt100_load"] = dict(
-        description="99 is not in allowed_values [0, 1, 4, 5]",
-        component="mppt100",
-        write=dict(transport="vedirect", vedirect_set="load_control", on=99, off=0),
-        read=dict(transport="dbus", state="load_state"),
-    )
-
-    class Cfg:
-        system_components = config_default.system_components
-        battery = config_default.battery
-        aux_components = config_default.aux_components
-        actuators = broken
+def test_vedirect_write_value_must_be_allowed_by_the_register(fake_bus, monkeypatch):
+    monkeypatch.setattr(VictronSolarMPPTWithDCLoad, "component_actuators", [
+        ActuatorType(
+            basename="load",
+            description="99 is not in allowed_values [0, 1, 4, 5]",
+            write=dict(transport="vedirect", vedirect_set="load_control", on=99, off=0),
+            read=dict(transport="dbus", state="load_state"),
+        ),
+    ])
 
     with pytest.raises(ValueError, match="not in allowed_values"):
-        discovery.discover(fake_bus, Cfg)
+        discovery.discover(fake_bus, config_default)
+
+
+def test_read_only_discovery_never_writes_the_bus(bus_values, fast_wake):
+    """Validating beside a live system must not pulse the inverter (A11 / deploy)."""
+    bus = FakeBus(_asleep_multiplus(bus_values))
+
+    discovery.discover(bus, config_default, run_startup_sequence=False)
+
+    assert bus_values[MULTIPLUS]["/Mode"] == MULTIPLUS_OFF     # never started
+    assert bus_values[MULTIPLUS]["/Dc/0/Voltage"] == DBUS_INVALID

@@ -93,6 +93,7 @@ def _resolve_endpoint(spec, component, service, aux, where):
             "component": component.short_name,
             "port": _port_from_service(service, where),
             "register": vs.register,
+            "value_type": vs.value_type,
             "on": on,
             "off": off,
         }
@@ -109,8 +110,13 @@ def _resolve_endpoint(spec, component, service, aux, where):
     raise ValueError(f"{where}: unknown transport {transport!r}")
 
 
-def build_actuator_registry(psystem, components_status, aux_by_name, actuators_config):
-    """Resolve the declared actuators into concrete, Gateway-consumable addresses.
+def build_actuator_registry(psystem, components_status, aux_by_name):
+    """Resolve every component's declared actuators into Gateway-consumable addresses.
+
+    Each component class declares what *it* can switch (`component_actuators`); the
+    installation only chooses the `short_name` that prefixes the logical name. So
+    nothing here — and nothing in `config_default` — restates a D-Bus path, a register
+    or an on/off integer.
 
     An actuator whose component is not on the bus is emitted with available=False
     rather than dropped: the Gateway should report "the Multiplus is missing" instead
@@ -118,34 +124,37 @@ def build_actuator_registry(psystem, components_status, aux_by_name, actuators_c
     """
     registry = {}
 
-    for name, decl in actuators_config.items():
-        where = f"actuator {name!r}"
-        entry = {"description": decl.get("description", "")}
+    for short_name, component in psystem.items():
+        if component.hardware is None:      # A10: not a bus device, nothing to drive
+            continue
+        service = components_status[short_name]["service"]
+        available = components_status[short_name]["available"]
 
-        if "aux_component" in decl:
-            aux = aux_by_name.get(decl["aux_component"])
-            if aux is None:
-                raise ValueError(f"{where}: no aux component {decl['aux_component']!r}")
-            component = service = None
-            entry["aux_component"] = decl["aux_component"]
-            available = True          # HTTP devices are not discovered; assume reachable
-        else:
-            short_name = decl["component"]
-            if short_name not in psystem:
-                raise ValueError(f"{where}: no component {short_name!r}")
-            component = psystem[short_name]
-            aux = None
-            service = components_status[short_name]["service"]
-            available = components_status[short_name]["available"]
-            entry["component"] = short_name
+        for decl in component.component_actuators:
+            name = f"{short_name}_{decl.basename}"
+            where = f"actuator {name!r}"
+            entry = {
+                "description": decl.description,
+                "component": short_name,
+                "available": available,
+            }
+            if available:
+                entry["write"] = _resolve_endpoint(decl.write, component, service, None, where)
+                entry["read"] = _resolve_endpoint(decl.read, component, service, None, where)
+            registry[name] = entry
 
-        entry["available"] = available
-
-        if available:
-            for half in ("write", "read"):
-                entry[half] = _resolve_endpoint(decl[half], component, service, aux, where)
-
-        registry[name] = entry
+    for short_name, aux in aux_by_name.items():
+        for decl in aux.component_actuators:
+            name = f"{short_name}_{decl.basename}"
+            where = f"actuator {name!r}"
+            registry[name] = {
+                "description": decl.description,
+                "aux_component": short_name,
+                # HTTP devices are not discovered; assume reachable.
+                "available": True,
+                "write": _resolve_endpoint(decl.write, None, None, aux, where),
+                "read": _resolve_endpoint(decl.read, None, None, aux, where),
+            }
 
     return registry
 
@@ -212,13 +221,20 @@ def startup_sequence(bus, psystem) -> None:
             wake(bus)
 
 
-def discover(bus, config):
-    """Walk the bus and build the whole topology contract as a plain dict."""
+def discover(bus, config, run_startup_sequence=True):
+    """Walk the bus and build the whole topology contract as a plain dict.
+
+    `run_startup_sequence=False` makes this pass strictly read-only. That matters
+    while the predecessor is still the live system: the wake-up below is the one
+    place the Power System writes D-Bus, and a second process pulsing the inverter
+    underneath a running system is not a validation, it is an incident.
+    """
     from . import power_system
 
     psystem = power_system.Power_system(config.system_components)
 
-    startup_sequence(bus, psystem)
+    if run_startup_sequence:
+        startup_sequence(bus, psystem)
 
     variables_to_log, _ = psystem.get_variables_to_log(bus)
     states_to_log, _ = psystem.get_states_to_log(bus)
@@ -243,9 +259,7 @@ def discover(bus, config):
         for short_name, c in aux_by_name.items()
     }
 
-    registry = build_actuator_registry(
-        psystem, components_status, aux_by_name, config.actuators
-    )
+    registry = build_actuator_registry(psystem, components_status, aux_by_name)
 
     return {
         "generated_at": datetime.now().isoformat(timespec="seconds"),

@@ -19,33 +19,18 @@ import pytz
 
 from . import config_default as config
 from . import discovery, paths, poll
+from .manufacturer.victron import get_bus
 
 # Past this age a persisted SOC estimate is discarded and SOC is re-derived from
 # open-circuit voltage: coulomb counting cannot account for a gap it did not see.
 MAX_SOC_STATE_AGE = timedelta(hours=1)
 
 
-def get_bus():
-    """Import pydbus lazily so the package stays importable off-device.
-
-    pydbus needs the system gobject bindings, which only exist on the Venus OS box.
-    Everything else here takes `bus` as an argument, so the tests pass a fake and
-    never reach this function.
-    """
-    import os
-
-    if os.environ.get("VICTRON_TEST_SESSION_BUS"):
-        from pydbus import SessionBus
-        return SessionBus()
-    from pydbus import SystemBus
-    return SystemBus()
-
-
-def setup(bus, tz, debug=False):
+def setup(bus, tz, debug=False, run_startup_sequence=True):
     """Discover the topology, publish it, and prepare the estimator."""
     paths.ensure_dirs()
 
-    system_config, psystem = discovery.discover(bus, config)
+    system_config, psystem = discovery.discover(bus, config, run_startup_sequence)
     discovery.save_system_configuration(system_config, paths.SYSTEM_CONFIG_PATH)
 
     unavailable = [
@@ -105,12 +90,23 @@ def main(argv=None) -> int:
         "--once", action="store_true",
         help="discover, poll once, write both contracts, exit",
     )
+    parser.add_argument(
+        "--no-startup-sequence", action="store_true",
+        help="never write D-Bus — skip the Multiplus measurement wake-up (A11). "
+             "Required while another system is live on this bus.",
+    )
     args = parser.parse_args(argv)
 
     tz = pytz.timezone(config.tz)
     bus = get_bus()
 
-    system_config, psystem, simulator, soc_tracker = setup(bus, tz, args.debug)
+    if args.no_startup_sequence:
+        print("[power_system] startup sequence disabled — this process will not "
+              "write D-Bus at all")
+
+    system_config, psystem, simulator, soc_tracker = setup(
+        bus, tz, args.debug, run_startup_sequence=not args.no_startup_sequence
+    )
 
     if args.once:
         t_now = datetime.now(tz=tz)

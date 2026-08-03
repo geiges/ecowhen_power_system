@@ -4,6 +4,8 @@ from typing import NamedTuple, Optional
 import re
 import requests
 
+from .manufacturer import ActuatorType
+
 
 class AuxVariableType(NamedTuple):
     basename: str
@@ -18,6 +20,7 @@ class BaseAuxComponent:
     """
     protocol: str = 'base'
     component_variables: list = []
+    component_actuators: list = []
 
     def __init__(self, short_name: str):
         self.short_name = short_name
@@ -100,6 +103,17 @@ class TasmotaSmartPlug(BaseAuxComponent):
     component_variables = [
         AuxVariableType(basename='power_w',    unit='W'),
         AuxVariableType(basename='today_kwh',  unit='kWh'),
+    ]
+    component_actuators = [
+        # The plug's own relay. Its URL comes from this instance, so the address used
+        # to switch it is the same one used to read it — which is the point: the
+        # predecessor declared the two in separate files and they drifted apart.
+        ActuatorType(
+            basename='relay',
+            description='Tasmota relay output',
+            write=dict(transport='tasmota'),
+            read=dict(transport='tasmota'),
+        ),
     ]
 
     def __init__(self, short_name: str, url: str,

@@ -141,53 +141,22 @@ aux_components = [
 ]
 
 # ----------------------------------------------------------------------------
-# Actuator registry
+# Actuators
 # ----------------------------------------------------------------------------
-# The logical actuators Control is allowed to command, and how the Gateway reaches
-# each one. These names are the *whole* vocabulary Control speaks — it says
-# command("multiplus_mode", on=True) and never learns that "on" is the integer 3.
+# Nothing to declare here. Each component class declares what it can switch
+# (`component_actuators`), and discovery resolves those against the live bus into
+# system_configuration.yaml, where the Gateway is the only consumer.
 #
-# Declared once, here. Discovery resolves the concrete addresses off the live bus
-# and writes them into system_configuration.yaml; the Gateway is the only consumer.
-# Declaring the Tasmota URLs in exactly one place (they come from the aux component
-# below) is what stops the predecessor's bug where the reading URL and the writing
-# URL drifted apart and the AC hard-cut silently stopped firing.
+# The logical names come out as {short_name}_{basename}, and they are the *whole*
+# vocabulary Control speaks: it says command("multiplus_mode", on=True) and never
+# learns that "on" is the integer 3. The names this installation therefore has:
 #
-# `on`/`off` are omitted wherever they can be derived from a component state's
-# `mapping` (e.g. the Multiplus declares {3: "on", 4: "off"} already).
-actuators = {
-    'multiplus_mode': dict(
-        description='Multiplus II inverter on/off',
-        component='multiplus',
-        write=dict(transport='dbus', state='inverter_mode'),
-        read=dict(transport='dbus', state='inverter_mode'),
-    ),
-    'mppt100_load': dict(
-        description='DC load output on the mppt100 — the battery-compartment fan',
-        component='mppt100',
-        # ASYMMETRIC, and deliberately so: /Load/State is read-only on this model,
-        # so writes go out over VE.Direct HEX while reads come back over D-Bus.
-        # The two use *different value spaces*: writing off is register value 0,
-        # but reading off comes back as /Load/State == 1. A reconcile loop that
-        # assumed one number for "off" would write 0, read 1, call it a mismatch
-        # and flap the fan until it exhausted its retries.
-        write=dict(transport='vedirect', vedirect_set='load_control', on=4, off=0),
-        read=dict(transport='dbus', state='load_state'),
-    ),
-    'wallbox_charge': dict(
-        description='Wallbox charging plug',
-        aux_component='wallbox',
-        write=dict(transport='tasmota'),
-        read=dict(transport='tasmota'),
-    ),
-    'ac_inverter_plug': dict(
-        description='Hard-cuts mains AC to the ac_mppt (Deye) inverter',
-        aux_component='ac_inverter',
-        write=dict(transport='tasmota'),
-        read=dict(transport='tasmota'),
-    ),
-}
-
+#   multiplus_mode        the Multiplus II inverter
+#   mppt100_load          the mppt100's DC load output — wired to the battery-
+#                         compartment fan
+#   wallbox_relay         the wallbox charging plug
+#   ac_inverter_relay     hard-cuts mains AC to the ac_mppt (Deye) inverter
+#
 # ponytail: the `from config import *` override hook was dropped in the port —
 # no config.py ever existed, and any stray one on sys.path would have silently
 # replaced the calibration constants above. Reinstate a *named* override

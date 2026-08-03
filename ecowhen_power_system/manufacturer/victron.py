@@ -8,11 +8,29 @@ Created on Fri Jul 31 10:44:39 2026
 import time
 from typing import NamedTuple
 
+from . import ActuatorType
+
 # Victron's com.victronenergy.BusItem.SetValue answers 0 on success, -1 on refusal.
 DBUS_SET_OK = 0
 
 
-def _read_number(dbus, service, path):
+def get_bus():
+    """Connect to the Venus OS system bus.
+
+    pydbus is imported lazily so the package stays importable off-device: it needs
+    the system gobject bindings, which only exist on the box. Every other bus entry
+    point here takes `dbus` as an argument, so tests pass a fake and never get here.
+    """
+    import os
+
+    if os.environ.get("VICTRON_TEST_SESSION_BUS"):
+        from pydbus import SessionBus
+        return SessionBus()
+    from pydbus import SystemBus
+    return SystemBus()
+
+
+def read_number(dbus, service, path):
     """Read one numeric D-Bus value, or None if it is missing or invalid.
 
     Victron answers an *empty array* — not an error, not None — for a value the
@@ -27,7 +45,7 @@ def _read_number(dbus, service, path):
     return value if isinstance(value, (int, float)) else None
 
 
-def _write_number(dbus, service, path, value) -> bool:
+def write_number(dbus, service, path, value) -> bool:
     """Write one D-Bus value. True if the bus accepted it.
 
     BusItem.SetValue takes a variant, so on a real bus the int has to be wrapped;
@@ -55,13 +73,13 @@ class StateType(NamedTuple):
     basename: str
     subaddress: str
     mapping: dict
-    toggle_values: list = []
 
 class VeDirectSetType(NamedTuple):
     basename: str
     register: int               # VE.Direct HEX register address, e.g. 0xEDAB
     allowed_values: list = []   # empty = any value accepted
     readable: bool = True       # also emit a vedirect_get read command
+    value_type: str = "un8"     # vregd type prefix — a property of the register
 
 class DBusComponent(object):
     """ Contains all dbus-related methods shared bettween victron components and 
@@ -70,7 +88,8 @@ class DBusComponent(object):
     hardware = "dbus_generic"
     component_states = []
     vedirect_sets = []
-    
+    component_actuators = []
+
     def _components_on_bus(self, dbus):
         """
         Check is type of device is available on bus and returns instances
@@ -149,7 +168,8 @@ class VictronBaseComponent(DBusComponent):
     hardware = "victron"
     component_states = []
     vedirect_sets = []
-    
+    component_actuators = []
+
     def __init__(self, 
                  product_name, 
                  short_name, 
@@ -209,7 +229,7 @@ class VictronSolarMPPT(VictronBaseComponent):
         ]
     component_states = [
         StateType(basename = 'tracking_state', subaddress='/State', mapping= {0 : 'off', 3: "bulk", 4: "absorbtion", 5: "float"}),
-        StateType(basename = 'mppt_mode', subaddress='/Mode', mapping= {0: "ideal", 1: "working", 4: "off"}, toggle_values= [1,4]),
+        StateType(basename = 'mppt_mode', subaddress='/Mode', mapping= {0: "ideal", 1: "working", 4: "off"}),
         ]
     
     
@@ -234,13 +254,28 @@ class VictronSolarMPPTWithDCLoad(VictronBaseComponent):
         ]
     component_states = [
         StateType(basename = 'tracking_state', subaddress='/State', mapping= {0 : 'off', 3: "bulk", 4: "absorbtion", 5: "float"}),
-        StateType(basename = 'mppt_mode', subaddress='/Mode', mapping= {0: "ideal", 1: "working", 4: "off"}, toggle_values =[1,4]),
+        StateType(basename = 'mppt_mode', subaddress='/Mode', mapping= {0: "ideal", 1: "working", 4: "off"}),
         StateType(basename = 'load_state', subaddress='/Load/State', mapping= {1: "off", 4: "on", 5: "USER"}),
         ]
     vedirect_sets = [
         VeDirectSetType(basename='load_control', register=0xEDAB, allowed_values=[0, 1, 4, 5]),
     ]
-    
+    component_actuators = [
+        # ASYMMETRIC, and that is a property of this model: /Load/State is read-only,
+        # so writes go out over VE.Direct HEX while reads come back over D-Bus — in
+        # *different value spaces*. Writing off is register value 0, but reading off
+        # comes back as /Load/State == 1. A reconcile loop that assumed one number for
+        # "off" would write 0, read 1, call it a mismatch and flap the load until it
+        # exhausted its retries.
+        ActuatorType(
+            basename='load',
+            description='DC load output',
+            write=dict(transport='vedirect', vedirect_set='load_control', on=4, off=0),
+            read=dict(transport='dbus', state='load_state'),
+        ),
+    ]
+
+
     def __init__(self, product_name, short_name, const_consumption=0.0, connected_PV=None):
          
         component_type = 'com.victronenergy.solarcharger'
@@ -261,10 +296,20 @@ class VictronMultiplusII(VictronBaseComponent):
         ]
     
     component_states = [
-        StateType(basename = 'inverter_mode', subaddress='/Mode', mapping= {3: "on", 4: "off"}, toggle_values= [3,4]),
+        StateType(basename = 'inverter_mode', subaddress='/Mode', mapping= {3: "on", 4: "off"}),
         ]
-    
-    
+    component_actuators = [
+        # on/off are not restated here: the inverter_mode state above already declares
+        # {3: "on", 4: "off"}, and discovery inverts that mapping.
+        ActuatorType(
+            basename='mode',
+            description='Inverter on/off',
+            write=dict(transport='dbus', state='inverter_mode'),
+            read=dict(transport='dbus', state='inverter_mode'),
+        ),
+    ]
+
+
     def __init__(self, product_name, short_name, const_consumption=0.0, connected_PV=None):
 
         component_type ='com.victronenergy.vebus'
@@ -290,7 +335,7 @@ class VictronMultiplusII(VictronBaseComponent):
     def _set_mode(self, dbus, label) -> bool:
         state = self._inverter_mode()
         value = {lbl: val for val, lbl in state.mapping.items()}[label]
-        return _write_number(dbus, self.get_interface(dbus), state.subaddress, value)
+        return write_number(dbus, self.get_interface(dbus), state.subaddress, value)
 
     def manual_start(self, dbus):
         """
@@ -318,7 +363,7 @@ class VictronMultiplusII(VictronBaseComponent):
 
     def _measurements_readable(self, dbus, service) -> bool:
         return all(
-            _read_number(dbus, service, var.subaddress) is not None
+            read_number(dbus, service, var.subaddress) is not None
             for var in self.component_variables
             if var.basename in self.MEASUREMENT_VARIABLES
         )
@@ -355,7 +400,7 @@ class VictronMultiplusII(VictronBaseComponent):
             return True
 
         mode_path = self._inverter_mode().subaddress
-        previous_mode = _read_number(dbus, service, mode_path)
+        previous_mode = read_number(dbus, service, mode_path)
 
         ready = False
         for attempt in range(1, self.MEASUREMENT_WAKE_ATTEMPTS + 1):
@@ -376,7 +421,7 @@ class VictronMultiplusII(VictronBaseComponent):
         if previous_mode is None:
             self.manual_stop(dbus)
         else:
-            _write_number(dbus, service, mode_path, previous_mode)
+            write_number(dbus, service, mode_path, previous_mode)
 
         if ready:
             print(f"[{self.short_name}] DC measurements available")
