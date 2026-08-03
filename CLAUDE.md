@@ -182,13 +182,25 @@ treated.
 GET  /actuators/                     list
 GET  /actuators/<name>               {"value": .., "on": true|false|null}
 POST /actuators/<name>               {"on": bool}
-GET  /control/modes | /services | /schedule | /modes/requests | /config | /log
+GET  /control/modes | /services | /schedule | /modes/requests | /config | /log | /agents
 POST /control/modes/<name>/activate  {} = standing want; {"from","until"} = a booking
 POST /control/modes/<name>/deactivate  drops the standing want AND every booking for it
 DELETE /control/modes/bookings/<id>  cancel one booking
 PUT  /control/config                 deep-merge into control_config.yaml
 GET  /files/runtime/… | /files/data/…
 ```
+
+`/control/agents` is each agent with its `enabled` flag and the last thing it said, and the
+agent list comes from `ControlConfig.agents`' own fields — adding an agent there is the only
+edit needed.
+
+**Two file endpoints, and the split matters to consumers:** `runtime` serves the contracts
+(`state.json`, `system_configuration.yaml`, the status files), `data` serves the durable time
+series and user intent. A client that wants both — the dashboard does — must sync both.
+Subdirectory patterns are listed explicitly in `files.py`'s allow-list (`aggregations/*.csv`
+for `daily.csv`) because `list_files` uses `Path.glob`, which does not recurse: a bare `*.csv`
+would serve a file on request but never list it, and a client syncing from the listing would
+never learn it exists.
 
 A status file Control has not written yet answers **503 naming Control**, never 404. Same for
 the registry before the Power System's first publish.
@@ -202,7 +214,7 @@ would break the single-producer rule on that file.
 ## Working here
 
 ```bash
-uv run python -m pytest tests/     # 164 tests, green. Keep it that way.
+uv run python -m pytest tests/     # 166 tests, green. Keep it that way.
 uv run ecops-power-system --once   # single poll; --no-startup-sequence to never write the bus
 uv run ecops-control --dry-run     # run every agent, command nothing
 uv run ecops-logger --once
