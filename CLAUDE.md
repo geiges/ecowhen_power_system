@@ -58,7 +58,8 @@ control/                config, state, forecast, projection, gateway_client, ser
                         package, so the spike tests carry no hardware in their import graph),
                         actuation (this installation's services + modes), agents/, decision_log.
 tools/replay.py         Score estimator changes against recorded CSVs. Use this, not argument.
-deploy/                 push / install / start / doctor / compare. See deploy/README.md.
+deploy/                 push / install / start / doctor / compare. CUTOVER.md is the runbook,
+                        README.md the reasoning behind the deployment's shape.
 ```
 
 ## The two contracts
@@ -93,6 +94,7 @@ Two layers, deliberately different names:
 | `fan` (service) | `mppt100_load` |
 | `wallbox` (mode) | `wallbox_relay`, requires `ac_inverter` + `fan` |
 | `cooling` (mode) | nothing of its own; requires `fan` |
+| `ac_on` (mode) | nothing of its own; requires `ac_inverter` — the user's "I want mains" |
 
 `ac_inverter_relay` (the Tasmota that hard-cuts mains to the Deye) is **not** a service. Only
 the safety agent touches it, as a direct command — nothing in the mode graph may switch it
@@ -242,6 +244,9 @@ dangerous failure mode here. `deploy/compare.py` diffs `state.json` against the 
 cutover — it is the exclusive step.
 
 ### The cutover
+
+**`deploy/CUTOVER.md` is the runbook** — the ordered command sequence to follow at the box.
+What follows is the summary; that file is what you actually work from.
 
 Stop the predecessor's `control_runner.py` — confirm it is stopped, not merely quiet — then
 `ECOPS_PARALLEL=0 ./deploy/start.sh --restart --no-control`. Revert = kill the `ecops` tmux

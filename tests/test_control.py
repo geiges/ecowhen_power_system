@@ -424,7 +424,7 @@ def test_a_cycle_publishes_both_status_files(unit, runtime_dirs):
 
     modes = json.loads(runtime_dirs.MODES_STATUS_PATH.read_text())
     services = json.loads(runtime_dirs.SERVICES_STATUS_PATH.read_text())
-    assert set(modes["modes"]) == {"wallbox", "cooling"}
+    assert set(modes["modes"]) == {"wallbox", "cooling", "ac_on"}
     assert set(services["services"]) == {"ac_inverter", "fan"}
 
 

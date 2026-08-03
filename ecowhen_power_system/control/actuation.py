@@ -12,6 +12,7 @@ Names live on two different layers, and they are deliberately not the same (A8):
     fan                     mppt100_load
     wallbox (mode)          wallbox_relay
     cooling (mode)          — nothing of its own; it only wants the fan
+    ac_on (mode)            — nothing of its own; it only wants ac_inverter
 
 `ac_inverter_relay` (the Tasmota that hard-cuts mains to the Deye) is deliberately
 not a service. Only the safety agent touches it, as a direct command at the top
@@ -87,6 +88,10 @@ def build(gateway, config):
             ActuatorMode("wallbox", "wallbox_relay", gateway,
                          required_services=["ac_inverter", "fan"]),
             ServiceOnlyMode(name="cooling", required_services=["fan"]),
+            # The user's way to say "I want mains". Same shape as cooling: no
+            # actuator of its own, it just holds a reference on ac_inverter, so
+            # it composes with wallbox instead of fighting it.
+            ServiceOnlyMode(name="ac_on", required_services=["ac_inverter"]),
         )
     }
     return services, modes
