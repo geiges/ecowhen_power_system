@@ -29,12 +29,52 @@ Both are produced by the Power System, and everything else consumes them.
 1. **Exactly one process writes hardware** (the Gateway). Reads are idempotent and
    conflict-free, so several processes may read; only one may write.
 2. **The brain holds no hardware I/O and no magic numbers.** Control says
-   `command("ac_inverter", on=True)`; the Gateway resolves that to D-Bus `/Mode` = 3.
+   `command("multiplus_mode", on=True)`; the Gateway resolves that to D-Bus
+   `/Mode` = 3.
 3. **The Logger is a pure sink.** If something needs to read a logged value, that
    value belongs in `state.json` instead.
 4. **Ordering is declarative.** A Mode declares the Services it requires; Services are
    reference-counted and own their own actuation, verification and retry. Ordering
    falls out of the dependency graph rather than hand-written step lists.
+
+## Services and modes
+
+Every actuator is one service. A service is named for the **hardware it switches**; a
+mode is named for **what the user wants**. Actuator names are the Gateway's, resolved
+from the component classes onto the bus, and are left alone — `ac_inverter_relay` is
+the Tasmota plug that feeds mains to the Deye, which is why the service on top of it
+is `deye_inverter`.
+
+| service | actuator | hardware |
+|---|---|---|
+| `multiplus_ac` | `multiplus_mode` | the Multiplus II inverter |
+| `mppt100_dc_load` | `mppt100_load` | the MPPT's DC load output — the compartment fans |
+| `wallbox_charger` | `wallbox_relay` | the wallbox charging plug |
+| `deye_inverter` | `ac_inverter_relay` | mains to the Deye (the plug has no function of its own) |
+| `other_ac_supply` | `ac_other_relay` | the spare AC socket |
+
+| mode | primary service | prerequisites |
+|---|---|---|
+| `wallbox` | `wallbox_charger` | `multiplus_ac`, `mppt100_dc_load` |
+| `ac_solar` | `deye_inverter` | `multiplus_ac` |
+| `ac_other` | `other_ac_supply` | `multiplus_ac` — and `blocked_by` `wallbox` |
+| `cooling` | — | `mppt100_dc_load` |
+| `ac_on` | — | `multiplus_ac` |
+
+The two tables are separate mappings; the rows do not line up across them.
+
+A mode's **primary** is the service it holds only once its prerequisites are
+satisfied, and lets go of first on the way down — that is the two-level ordering, and
+why a plug is not simply another prerequisite. `cooling` and `ac_on` have no primary:
+they *are* their requirements.
+
+`ac_other` declares `blocked_by=["wallbox"]`, one-sidedly, and **that declaration is
+the priority rule** — the mode that gives way is the one that says so. It holds from
+the moment the wallbox is *wanted* until it is all the way back to `inactive`, so the
+two are never both active. Do not make it mutual: `_apply_blocks` walks the modes in
+order, so the first one asked would block itself, the second would then read as
+un-requested and never be blocked, and which of the two starves would be decided by
+dict order rather than by priority.
 
 ## Running
 

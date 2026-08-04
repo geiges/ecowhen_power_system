@@ -399,6 +399,28 @@ def test_the_plug_drops_before_the_services_do(system):
         "the inverter must not vanish from under a live plug"
 
 
+def test_a_safety_cut_is_not_fought_by_the_plugs_own_service(system):
+    """The reason the primary is released in the declare pass, not the reconcile.
+
+    Safety cuts `ac_inverter_relay` by direct command and blocks `ac_solar` in the
+    same cycle. The plug is a service now, so if the release came a pass later the
+    service would see target=on, actual=off and drive it straight back on.
+    """
+    from ecowhen_power_system.control.coordinator import ModeBlock
+
+    want(system, ("ac_solar", "user_agent"))
+    assert tick_until(system, lambda: system.modes["ac_solar"].state == "active")
+
+    system.gateway.command("ac_inverter_relay", False)      # safety, immediate
+    system.gateway.commands.clear()
+    want(system, ("ac_solar", "user_agent"))                # still wanted
+    system.coordinator.set_agent_blocks(
+        [ModeBlock("ac_solar", "system_safety", "battery hot")])
+    system.coordinator.tick(system.config)
+
+    assert ("ac_inverter_relay", True) not in system.gateway.commands
+
+
 def test_the_fan_stays_up_while_cooling_still_wants_it(system):
     """Reference counting is the reason cooling is a mode and not a write."""
     want(system, ("wallbox", "soc_wallbox_charge"), ("cooling", "system_safety"))
@@ -407,7 +429,7 @@ def test_the_fan_stays_up_while_cooling_still_wants_it(system):
     want(system, ("cooling", "system_safety"))
     assert tick_until(system, lambda: system.modes["wallbox"].state == "inactive")
 
-    assert system.services["fan"].required_by == {"cooling"}
+    assert system.services["mppt100_dc_load"].required_by == {"cooling"}
     assert system.gateway.actual["mppt100_load"] is True
 
     want(system)
@@ -427,7 +449,7 @@ def test_an_unreachable_actuator_waits_instead_of_driving_blind(config):
         coordinator.tick(config)
 
     assert ("multiplus_mode", True) not in gateway.commands
-    assert services["ac_inverter"].phase == "converging"
+    assert services["multiplus_ac"].phase == "converging"
 
 
 # ---------------------------------------------------------------------------
@@ -463,7 +485,10 @@ def test_a_cycle_publishes_both_status_files(unit, runtime_dirs):
     assert set(modes["modes"]) == {
         "wallbox", "ac_solar", "ac_other", "cooling", "ac_on",
     }
-    assert set(services["services"]) == {"ac_inverter", "fan"}
+    assert set(services["services"]) == {
+        "multiplus_ac", "mppt100_dc_load", "wallbox_charger", "deye_inverter",
+        "other_ac_supply",
+    }
 
 
 def test_the_user_request_file_activates_a_mode(unit, runtime_dirs):
@@ -701,8 +726,8 @@ def test_activating_the_wallbox_reaches_the_hardware(wired, runtime_dirs):
     assert any(on for on in wired.plugs.values())
 
     services = json.loads(runtime_dirs.SERVICES_STATUS_PATH.read_text())["services"]
-    assert services["ac_inverter"]["phase"] == "satisfied"
-    assert services["fan"]["phase"] == "satisfied"
+    assert services["multiplus_ac"]["phase"] == "satisfied"
+    assert services["mppt100_dc_load"]["phase"] == "satisfied"
 
 
 def test_the_ac_plug_modes_bring_mains_up_first_and_leave_the_fan_alone(wired,
@@ -737,7 +762,7 @@ def test_the_ac_plug_modes_bring_mains_up_first_and_leave_the_fan_alone(wired,
 
     # One service, two holders: the inverter stays up until the second lets go.
     services = json.loads(runtime_dirs.SERVICES_STATUS_PATH.read_text())["services"]
-    assert set(services["ac_inverter"]["requirers"]) == {"ac_solar", "ac_other"}
+    assert set(services["multiplus_ac"]["requirers"]) == {"ac_solar", "ac_other"}
 
 
 def test_the_spare_socket_yields_to_the_wallbox(wired, runtime_dirs):

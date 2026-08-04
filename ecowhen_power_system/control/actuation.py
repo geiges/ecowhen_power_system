@@ -1,27 +1,41 @@
-"""What this installation actually has: two services, five modes.
+"""What this installation actually has: five services, five modes.
 
 The spike's `service.py` / `mode.py` are abstract on purpose — they own the state
 machines and know nothing about hardware. Everything hardware-shaped is here, and it
 is thin, because the Gateway already resolved the hard part.
 
-Names live on two different layers, and they are deliberately not the same (A8):
+**Every actuator is a service; a mode is a set of services.** The two layers are still
+deliberately named differently, and now the rule is explicit: a *service* is named for
+the hardware it switches, a *mode* for what the user wants (A8):
 
-    service / mode name     the actuator it drives
-    --------------------    ---------------------
-    ac_inverter             multiplus_mode
-    fan                     mppt100_load
-    wallbox (mode)          wallbox_relay
-    ac_solar (mode)         ac_inverter_relay
-    ac_other (mode)         ac_other_relay
-    cooling (mode)          — nothing of its own; it only wants the fan
-    ac_on (mode)            — nothing of its own; it only wants ac_inverter
+    service            the actuator it drives     the hardware
+    ---------------    ----------------------     ---------------------------------
+    multiplus_ac       multiplus_mode             the Multiplus II inverter
+    mppt100_dc_load    mppt100_load               the MPPT's DC load — the fans
+    wallbox_charger    wallbox_relay              the wallbox charging plug
+    deye_inverter      ac_inverter_relay          mains to the Deye (the plug has no
+                                                  function of its own)
+    other_ac_supply    ac_other_relay             the spare AC socket
 
-`ac_inverter_relay` (the Tasmota feeding mains to the Deye) is still deliberately
-*not a service*: it has exactly one owner, the `ac_solar` mode, so it is never
-reference-counted and no second requester can hold it on. The safety agent still
-cuts it as a direct command at the top priority, and its inhibit stands `ac_solar`
-down for as long as the breach lasts — but when the breach clears and the mode is
-still wanted, the mode switches it back on. That is new: it used to take a human.
+    mode        primary service    prerequisites
+    --------    ---------------    -----------------------------
+    wallbox     wallbox_charger    multiplus_ac, mppt100_dc_load
+    ac_solar    deye_inverter      multiplus_ac
+    ac_other    other_ac_supply    multiplus_ac  (blocked_by wallbox)
+    cooling     —                  mppt100_dc_load
+    ac_on       —                  multiplus_ac
+
+A mode's *primary* service is the one it holds only once its prerequisites are
+satisfied, and lets go of first on the way down. That is the two-level ordering, and
+it is the whole reason a plug is not simply another prerequisite: parallel would
+switch the wallbox on before the inverter had mains.
+
+What this bought over commanding the plug from the mode directly: the plugs now have
+a retry budget, a `failed` phase and readback verification, which `apply_primary`
+never had — it re-POSTed forever and never failed.
+
+There is still no way to *forbid* a service. Safety blocks the mode; the primary is
+released by the state machine below and the service reverts on its own count.
 """
 from .mode import Mode
 from .service import SystemService
@@ -42,75 +56,97 @@ class ActuatorService(SystemService):
         return self.gateway.command(self.actuator, on)
 
 
-class ActuatorMode(Mode):
-    """A mode whose own effect is one Gateway actuator, gated on its services."""
+class ServiceMode(Mode):
+    """A mode is its services: prerequisites, plus at most one primary.
 
-    def __init__(self, name, actuator, gateway, required_services, blocked_by=None):
-        super().__init__(name=name, required_services=required_services,
-                         blocked_by=blocked_by)
-        self.actuator = actuator
-        self.gateway = gateway
-
-    def apply_primary(self, on, config):
-        return self.gateway.command(self.actuator, on)
-
-    def primary_satisfied(self, on, config):
-        return self.gateway.read(self.actuator) is on
-
-
-class ServiceOnlyMode(Mode):
-    """A mode that *is* its requirements — it has no actuator of its own.
-
-    `cooling` is this: the safety agent asks for the fan when the AC load has been
-    high for long enough, and the fan is already a shared service because the wallbox
-    needs it too. Reference counting is then the whole feature — whichever of the two
-    lets go last is the one that switches the fan off.
+    `cooling` and `ac_on` have no primary — they *are* their requirements, and
+    reference counting is then the whole feature: whichever of cooling and wallbox
+    lets go of the fans last is the one that switches them off.
     """
 
+    def __init__(self, name, services, required_services, primary=None,
+                 blocked_by=None):
+        super().__init__(name=name, required_services=required_services,
+                         blocked_by=blocked_by)
+        self.services = services
+        self.primary = primary
+
+    def declare_requirements(self, services):
+        """Prerequisites via the base class; the primary level-triggered on top.
+
+        The primary is required and released *here*, in the declare pass, and not in
+        `apply_primary` during the mode reconcile — the coordinator runs
+        declare → services → modes, so a release deferred to the reconcile would come
+        one pass too late. The tick where safety cuts the Deye plug by direct command
+        and blocks `ac_solar` would then find the service still targeting `on` with
+        the hardware off, and switch it straight back on.
+        """
+        super().declare_requirements(services)
+        if self.primary is None:
+            return
+        held = self.state in ("activating", "active") and all(
+            s.satisfied for s in self._mine(services))
+        primary = services[self.primary]
+        if held:
+            primary.require(self.name)
+        else:
+            primary.release(self.name)
+
     def apply_primary(self, on, config):
-        return True
+        return True                      # declare_requirements already said so
 
     def primary_satisfied(self, on, config):
-        return True
+        if self.primary is None:
+            return True
+        service = self.services[self.primary]
+        # "idle" and not just "satisfied": a service nobody requires, sitting at its
+        # default, is settled off — that is what the teardown is waiting to see.
+        return service.target_on == on and service.phase in ("satisfied", "idle")
+
+    def status(self):
+        status = super().status()
+        if self.primary:
+            # Everything the mode drives, not only what it waits on. `_mine` still
+            # sees the prerequisites alone, which is what gates the primary.
+            status.required_services = status.required_services + [self.primary]
+        return status
 
 
 def build(gateway, config):
     """The services and modes of this installation. Returns (services, modes)."""
-    services = {
-        s.name: s for s in (
-            ActuatorService("ac_inverter", "multiplus_mode", gateway,
-                            default_on=config.services.ac_inverter_default_on),
-            ActuatorService("fan", "mppt100_load", gateway,
-                            default_on=config.services.fan_default_on),
-        )
-    }
+    services = {}
+    for service in (
+        ActuatorService("multiplus_ac", "multiplus_mode", gateway,
+                        default_on=config.services.multiplus_ac_default_on),
+        ActuatorService("mppt100_dc_load", "mppt100_load", gateway,
+                        default_on=config.services.mppt100_dc_load_default_on),
+        # The three plugs. No default_on knob: a socket nobody asked for is off.
+        ActuatorService("wallbox_charger", "wallbox_relay", gateway),
+        ActuatorService("deye_inverter", "ac_inverter_relay", gateway),
+        ActuatorService("other_ac_supply", "ac_other_relay", gateway),
+    ):
+        services[service.name] = service
+
     modes = {
         m.name: m for m in (
-            # The wallbox needs mains from the inverter, and the compartment fan for
-            # the hours of DC load that follow. Exactly the predecessor's wallbox_on
-            # step list — inverter, then fan, then plug — except that here it is a
-            # declaration, and the teardown falls out of it instead of being written
-            # backwards in a second file.
-            ActuatorMode("wallbox", "wallbox_relay", gateway,
-                         required_services=["ac_inverter", "fan"]),
-            # Both plugs hang off the Multiplus's AC output, so mains has to be
-            # there before switching one on is worth anything — hence the same
-            # requirement, and hence a mode each rather than a bare actuator POST.
-            # `ac_solar` re-energises the Deye; `ac_other` is the spare socket.
-            ActuatorMode("ac_solar", "ac_inverter_relay", gateway,
-                         required_services=["ac_inverter"]),
-            # Both sockets on one inverter would sit over the AC limit, so the
-            # spare yields to the charger. Declared here and only here: the mode
-            # that gives way is the one that says so, which is the whole priority
-            # rule. `wallbox` knows nothing about it.
-            ActuatorMode("ac_other", "ac_other_relay", gateway,
-                         required_services=["ac_inverter"],
-                         blocked_by=["wallbox"]),
-            ServiceOnlyMode(name="cooling", required_services=["fan"]),
-            # The user's way to say "I want mains". Same shape as cooling: no
-            # actuator of its own, it just holds a reference on ac_inverter, so
-            # it composes with wallbox instead of fighting it.
-            ServiceOnlyMode(name="ac_on", required_services=["ac_inverter"]),
+            # Exactly the predecessor's wallbox_on step list — inverter, then fan,
+            # then plug — except that here it is a declaration, and the teardown
+            # falls out of it instead of being written backwards in a second file.
+            ServiceMode("wallbox", services, primary="wallbox_charger",
+                        required_services=["multiplus_ac", "mppt100_dc_load"]),
+            # Both plugs hang off the Multiplus's AC output, so mains has to be there
+            # before switching one on is worth anything.
+            ServiceMode("ac_solar", services, primary="deye_inverter",
+                        required_services=["multiplus_ac"]),
+            # Both sockets on one inverter would sit over the AC limit, so the spare
+            # yields to the charger. Declared here and only here: the mode that gives
+            # way is the one that says so. `wallbox` knows nothing about it.
+            ServiceMode("ac_other", services, primary="other_ac_supply",
+                        required_services=["multiplus_ac"], blocked_by=["wallbox"]),
+            ServiceMode("cooling", services,
+                        required_services=["mppt100_dc_load"]),
+            # The user's way to say "I want mains".
+            ServiceMode("ac_on", services, required_services=["multiplus_ac"]),
         )
     }
     return services, modes

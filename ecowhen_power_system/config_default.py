@@ -153,13 +153,16 @@ system_components = [
 # vocabulary Control speaks: it says command("multiplus_mode", on=True) and never
 # learns that "on" is the integer 3. The names this installation therefore has:
 #
-#   multiplus_mode        the Multiplus II inverter
+#   multiplus_mode        the Multiplus II inverter        (service multiplus_ac)
 #   mppt100_load          the mppt100's DC load output — wired to the battery-
-#                         compartment fan
-#   wallbox_relay         the wallbox charging plug
-#   ac_inverter_relay     mains AC to the ac_mppt (Deye) inverter — the `ac_solar`
-#                         mode owns it, and the safety agent hard-cuts it
-#   ac_other_relay        the spare AC socket — the `ac_other` mode
+#                         compartment fan                  (service mppt100_dc_load)
+#   wallbox_relay         the wallbox charging plug        (service wallbox_charger)
+#   ac_inverter_relay     mains AC to the ac_mppt (Deye) inverter — the safety agent
+#                         hard-cuts it                     (service deye_inverter)
+#   ac_other_relay        the spare AC socket              (service other_ac_supply)
+#
+# Every actuator is one service in `control/actuation.py`; the modes on top are
+# named for what the user wants, not for the hardware.
 #
 # ponytail: the `from config import *` override hook was dropped in the port —
 # no config.py ever existed, and any stray one on sys.path would have silently

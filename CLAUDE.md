@@ -91,28 +91,53 @@ the CSVs. Everything else is regenerated at startup.
 
 ## Actuators, services, modes
 
-Four actuators, resolved from the component classes onto the bus:
-`multiplus_mode`, `mppt100_load`, `wallbox_relay`, `ac_inverter_relay`.
+Five actuators, resolved from the component classes onto the bus: `multiplus_mode`,
+`mppt100_load`, `wallbox_relay`, `ac_inverter_relay`, `ac_other_relay`.
 
-Two layers, deliberately different names:
+**Every actuator is a service, and a mode is a set of services.** The two layers are still
+deliberately named differently, and the rule is now explicit: a **service is named for the
+hardware it switches**, a **mode for what the user wants**. Actuator names are the Gateway's
+and are left alone — `ac_inverter_relay` is the Tasmota that feeds mains to the Deye, which
+is exactly why the service on top of it is called `deye_inverter`.
 
-| service / mode | actuator |
-|---|---|
-| `ac_inverter` (service) | `multiplus_mode` |
-| `fan` (service) | `mppt100_load` |
-| `wallbox` (mode) | `wallbox_relay`, requires `ac_inverter` + `fan` |
-| `ac_solar` (mode) | `ac_inverter_relay`, requires `ac_inverter` — mains to the Deye |
-| `ac_other` (mode) | `ac_other_relay`, requires `ac_inverter` — the spare socket |
-| `cooling` (mode) | nothing of its own; requires `fan` |
-| `ac_on` (mode) | nothing of its own; requires `ac_inverter` — the user's "I want mains" |
+| service | actuator | hardware |
+|---|---|---|
+| `multiplus_ac` | `multiplus_mode` | the Multiplus II inverter |
+| `mppt100_dc_load` | `mppt100_load` | the MPPT's DC load output — the compartment fans |
+| `wallbox_charger` | `wallbox_relay` | the wallbox charging plug |
+| `deye_inverter` | `ac_inverter_relay` | mains to the Deye (the plug has no function of its own) |
+| `other_ac_supply` | `ac_other_relay` | the spare AC socket |
 
-`ac_inverter_relay` (the Tasmota feeding mains to the Deye) is still **not** a service — it
-has exactly one owner, the `ac_solar` mode, so nothing reference-counts it and no second
-requester can hold it on. Safety still cuts it as a direct command. **What changed with
-`ac_solar`: when the breach clears and the mode is still wanted, the mode switches the plug
-back on** — it used to take a human. The plug does not cycle on the limit, because safety
-*also* blocks the mode, and that block releases on `warn_max` rather than on the limit (see
-below).
+| mode | primary service | prerequisites |
+|---|---|---|
+| `wallbox` | `wallbox_charger` | `multiplus_ac`, `mppt100_dc_load` |
+| `ac_solar` | `deye_inverter` | `multiplus_ac` |
+| `ac_other` | `other_ac_supply` | `multiplus_ac` (and `blocked_by` `wallbox`) |
+| `cooling` | — | `mppt100_dc_load` |
+| `ac_on` | — | `multiplus_ac` — the user's "I want mains" |
+
+A mode's **primary** service is the one it holds only once its prerequisites are satisfied,
+and lets go of first on the way down. That is the two-level ordering, and it is why a plug is
+not simply another prerequisite: parallel convergence would switch the wallbox on before the
+inverter had mains. The primary is required and released in the **declare pass**, not in the
+mode reconcile — the tick order is declare → services → modes, so a release deferred to the
+reconcile would come one pass too late, and the tick where safety cuts the Deye plug by
+direct command would find the service still targeting `on` with the hardware off and drive it
+straight back on. There is a test for exactly that.
+
+The plugs gained what commanding them from the mode never had: a retry budget, a `failed`
+phase and readback verification. The cost is one extra tick each way — the primary is
+required in the declare pass and driven by the service pass, instead of being POSTed inline.
+
+`deye_inverter` has exactly one owner, the `ac_solar` mode, so its reference count never
+exceeds one; safety still cuts it as a direct command. **When the breach clears and the mode
+is still wanted, the mode switches the plug back on** — it used to take a human. The plug
+does not cycle on the limit, because safety *also* blocks the mode, and that block releases
+on `warn_max` rather than on the limit (see below).
+
+Only `multiplus_ac` and `mppt100_dc_load` carry a `services.*_default_on` knob. The three
+plugs do not: a socket nobody asked for is off, and a setting saying otherwise is a setting
+that switches the wallbox on by accident.
 
 ### Saying no
 
@@ -336,7 +361,7 @@ Four things run for the first time in that first minute. Watch them in this orde
    endpoint hold. New here are `cmnd=Power 1` and reading the `POWER` key back. Its old
    failure mode was silently doing nothing; the Gateway answers 502 instead.
 4. **Control's first tick**, which switches the Multiplus **off** if no mode wants it. That is
-   correct for this installation — `services.ac_inverter_default_on: false` is intended, not a
+   correct for this installation — `services.multiplus_ac_default_on: false` is intended, not a
    default nobody looked at. Expect the inverter to go off, and do not read it as a fault.
 
 Then let it run: `GET /control/modes`, `/control/services` and `/control/schedule` say what it
@@ -350,7 +375,7 @@ thinks it is doing, and `data/control_log.jsonl` says why.
 - **`SOC_counted` is path-dependent** and will never match another independently-started
   system. Compare `SOC_Kf`, or compare at a rest anchor.
 - **Control switches the Multiplus off when no mode wants it** — confirmed as the wanted
-  behaviour for this installation, so `services.ac_inverter_default_on` stays `false`. It is
+  behaviour for this installation, so `services.multiplus_ac_default_on` stays `false`. It is
   still the one setting that changes what an otherwise idle system does, which is why it is a
   knob rather than a literal in `actuation.py`.
 - **The Gateway's `vregd` and Tasmota *write* transports have never run**, on device or off —

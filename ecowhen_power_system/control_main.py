@@ -83,8 +83,8 @@ class ControlUnit:
         except Exception as exc:
             print(f"[control] config unreadable ({exc}) — keeping the loaded one")
             return
-        self.services["ac_inverter"].default_on = self.config.services.ac_inverter_default_on
-        self.services["fan"].default_on = self.config.services.fan_default_on
+        self.services["multiplus_ac"].default_on = self.config.services.multiplus_ac_default_on
+        self.services["mppt100_dc_load"].default_on = self.config.services.mppt100_dc_load_default_on
 
     def cycle(self, t_now=None) -> dict:
         self.reload_config()

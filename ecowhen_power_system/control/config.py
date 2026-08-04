@@ -121,9 +121,13 @@ class ServicesConfig(_FromDict):
     model — it is what the predecessor's `wallbox_off` sequence did by hand. It is
     also the one setting that changes what happens on an otherwise quiet system, so
     it is a knob rather than a constant.
+
+    Only these two. The three plugs are services as well now, but a socket nobody
+    asked for is off, and a knob saying otherwise is a knob to switch the wallbox on
+    by accident.
     """
-    ac_inverter_default_on: bool = False
-    fan_default_on: bool = False
+    multiplus_ac_default_on: bool = False
+    mppt100_dc_load_default_on: bool = False
 
 
 @dataclass
