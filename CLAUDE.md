@@ -35,17 +35,24 @@ Start order **① → ② and ③ → ④**. ② and ③ are independent; ④ ne
    transport, register, on/off values, in `component_actuators`. `config_default` declares
    no actuators. The exception is `connector_R0` / `voltage_offset`: those describe the
    *cable between a source and the battery clamps*, so they live on `Generic_Battery`.
+6. **There is one `system_components` list**, bus and HTTP devices alike. An HTTP device
+   is a component with `hardware = None`, which every bus walk already skips, and it is
+   identified by being able to `get_labeled_data()` — `psystem.http_components()`, the
+   only place that asks. Adding a plug is one entry in `config_default`; discovery,
+   polling, the CSV split and the actuator registry all follow from it.
 
 ## Files
 
 ```
 paths.py                RUNTIME_DIR (tmpfs, ephemeral) vs DATA_DIR (durable). Both env-overridable.
 config_default.py       THE calibration for this installation. Physical measurements — never retype.
+                        One `system_components` list; `aggregation.AUX_POWER_COLUMNS` is the
+                        one thing a new plug does not get for free.
 specifications.py       Cell chemistry incl. the OCV curve; safety limits derive from n_cells x spec.
 components.py           Composition layer over manufacturer/.
 manufacturer/victron.py DBusComponent (bus primitives, get_bus, read_number/write_number) + Victron classes.
-manufacturer/__init__.py ActuatorType — declared here because D-Bus and aux components both use it.
-aux_components.py       HTTP components (Tasmota plugs, Deye).
+manufacturer/__init__.py ActuatorType and HttpComponent — the vocabulary more than one maker needs.
+manufacturer/tasmota.py Tasmota smart plugs.  manufacturer/deye.py  Deye Sun inverter.
 discovery.py            startup sequence → bus walk → system_configuration.yaml + actuator registry + calibration guard.
 poll.py                 D-Bus + aux → estimator → state.json. SocTracker, durable SOC persistence.
 battery_simulation.py   The battery: Thevenin model, clamp derivation, coulomb counting, EKF. One class.
@@ -68,7 +75,8 @@ Both produced by the Power System, in `RUNTIME_DIR`.
 
 - **`system_configuration.yaml`** — topology: components, variable/state poll maps, and the
   actuator registry (logical name → transport + address + on/off, separate `write` and `read`
-  endpoints).
+  endpoints; a `read` may carry a `confirm` naming a variable and a threshold that must also
+  hold for `on`).
 - **`state.json`** — raw bus readings verbatim, plus derived `battery/voltage`,
   `battery/current`, `battery/voltage_spread`, `SOC_Kf`, `SOC_counted`,
   `time_to_low_battery`, `soc_above_threshold_since`, aux power keys, and a tz-aware ISO
@@ -93,12 +101,50 @@ Two layers, deliberately different names:
 | `ac_inverter` (service) | `multiplus_mode` |
 | `fan` (service) | `mppt100_load` |
 | `wallbox` (mode) | `wallbox_relay`, requires `ac_inverter` + `fan` |
+| `ac_solar` (mode) | `ac_inverter_relay`, requires `ac_inverter` — mains to the Deye |
+| `ac_other` (mode) | `ac_other_relay`, requires `ac_inverter` — the spare socket |
 | `cooling` (mode) | nothing of its own; requires `fan` |
 | `ac_on` (mode) | nothing of its own; requires `ac_inverter` — the user's "I want mains" |
 
-`ac_inverter_relay` (the Tasmota that hard-cuts mains to the Deye) is **not** a service. Only
-the safety agent touches it, as a direct command — nothing in the mode graph may switch it
-back on by reference counting.
+`ac_inverter_relay` (the Tasmota feeding mains to the Deye) is still **not** a service — it
+has exactly one owner, the `ac_solar` mode, so nothing reference-counts it and no second
+requester can hold it on. Safety still cuts it as a direct command. **What changed with
+`ac_solar`: when the breach clears and the mode is still wanted, the mode switches the plug
+back on** — it used to take a human. The plug does not cycle on the limit, because safety
+*also* blocks the mode, and that block releases on `warn_max` rather than on the limit (see
+below).
+
+### Saying no
+
+A mode is wanted by requesters and forbidden by **blockers**, and one blocker outvotes every
+requester. Blocking is not releasing: the requesters stay, so the want takes effect again by
+itself when the block lifts. A blocked mode stands down through the ordinary DEACTIVATING
+path — effect first, then the services — so nothing new happens on the way out. Both sets are
+in `GET /control/modes` (`requesters`, `blockers`) and the detail line names who.
+
+Two sources block, both recomputed every tick like everything else here (silence permits):
+
+- **`ModeBlock(mode, agent, reason)`** — an agent saying "not this one, not now". Its own type
+  rather than `ModeRequest(active=False)`, which means something weaker and already taken: that
+  is *one agent withdrawing its own want*, and the mode stays up if somebody else still asks.
+  Safety uses it for `ac_solar` — the direct command cuts the plug, the block stops the mode
+  putting it back on. It arms at the metric's **`warn_max`, not its limit**, and that asymmetry
+  is the deadband: cutting solar lowers the voltage, which clears the breach, which would
+  re-arm the solar. Nothing latches; the hysteresis is entirely in the two thresholds, and
+  both live in `battery` (`warn_max_voltage` 28.4 V under a 28.8 V limit, `warn_max_temp`
+  40 °C under 45 °C) so tuning it is a `PUT /control/config`, not a deploy. A warn threshold
+  on the wrong side of its limit is refused at load with a 400 naming it — it would otherwise
+  read as configured and arm nothing.
+- **`blocked_by`** on the mode class — one mode excluding another, declared **one-sidedly, and
+  that declaration is the priority rule**: the mode that gives way is the one that says so.
+  `ac_other` declares `blocked_by=["wallbox"]` (one AC budget, and the charger wins); `wallbox`
+  knows nothing about it. It holds from the moment the wallbox is *wanted* until it is all the
+  way back to `inactive`, both edges, so the two never overlap across a tick boundary. It is an
+  exclusion, not a hardware interlock — within a single tick both can move.
+
+There is deliberately **no way to forbid a service.** Services are reference-counted precisely
+because several modes may legitimately hold one; forcing one off would pull the inverter out
+from under a mode still using it. Block the mode, and the service falls away by its own count.
 
 **Actuators are declared explicitly in `component_actuators`; never auto-derive them from
 `component_states`.** That list *is* the allowlist of what may be written. Deriving would also
@@ -142,17 +188,31 @@ agent's is when it last planned.
 A booking is a *request*, not a guarantee of hardware state at that instant: the mode starts
 activating at `start` and its services converge over the next tick or two.
 
-Safety additionally carries `commands` (immediate writes) and `inhibit`, both synchronous and
-neither a booking. `fast_cycle` is only a cadence knob — it does not change how output is
-treated.
+Any agent may also publish `blocks` (see "Saying no"). Safety additionally carries `commands`
+(immediate writes) and `inhibit`, both synchronous and neither a booking — and an inhibit
+clears the blocks along with the requesters, since nothing is running to forbid. `fast_cycle`
+is only a cadence knob — it does not change how output is treated.
 
 ## Things that will bite you
 
-- **`mppt100_load` is asymmetric.** Write is VE.Direct register `0xEDAB` (`on=4`, `off=0`);
-  read is D-Bus `/Load/State` (`on=4`, `off=1`, and `5` = "USER"). Writing off is `0`, reading
-  off is `1`. The registry models `write` and `read` separately for exactly this reason.
-- **`on: null` is a real answer**, not `false`. An unknown readback means the service waits
-  rather than driving blind. Collapsing it to `false` flaps the fan every tick.
+- **`mppt100_load` is asymmetric, and the two sides are unrelated value spaces.** Write is
+  VE.Direct register `0xEDAB`, which takes `0/1/4/5` and where **on is `4`**. Read is D-Bus
+  `/Load/State`, which only ever answers `0` or `1` and where **on is `1`**. The bus is *not*
+  the register read back — nothing on it represents the register's `4` or `5`. Reading the
+  register's numbers off the bus is what jammed the fan on the device: `/Load/State == 1` was
+  labelled "off", so a fan that had come up read as still off, mismatched every tick, and
+  burned its retry budget. The registry models `write` and `read` separately for this reason.
+- **The fan's read declares a `confirm`, and both halves must hold.** `/Load/State == 1` says
+  the output is switched on, not that anything is turning, so it is confirmed against
+  `/Load/I >= 0.1 A` — the current actually flowing, which is what the predecessor verified
+  this step on (`wallbox_on.py`, and where `max_attempts=5` comes from). **0.1 A is exactly
+  what the fans draw**, so the comparison is `>=` and the threshold sits on the boundary; it
+  is a calibration knob on `VictronSolarMPPTWithDCLoad`, measured, not guessed. A `confirm`
+  makes a read *total*: `on` is null only when the bus is unreadable.
+- **`on: null` is a real answer**, not `false`, for any read without a `confirm`. The service
+  waits rather than driving blind — but note it waits *forever*: unknown burns no retry budget
+  and has no timeout, so an actuator whose state cannot answer the question needs a `confirm`
+  rather than a shrug. Collapsing null to `false` instead flaps the actuator every tick.
 - **A POST never reads back.** It reports what it wrote. Convergence takes two ticks on
   purpose; confirming in the same breath would trust a value the device may not have applied.
 - **`hardware = None` means "real component, nothing on the bus reports it"** (the battery,
@@ -265,8 +325,9 @@ Four things run for the first time in that first minute. Watch them in this orde
    D-Bus, and it is the only VE.Direct actuator, so `vedirect_read` is never reached and
    `int(token, 0)` never runs. What is unproven is that `vregd` is on PATH and that
    `vregd -c <port> -s 0xEDAB un8:4` is the right syntax. `POST /actuators/mppt100_load
-   {"on": true}` by hand, then `GET`: the write is `4`, the readback should be `4`; off writes
-   `0` but reads `1`. **Judge it on the readback, not the POST** — a `vregd` that exits 0
+   {"on": true}` by hand, then `GET`: the write is the register's `4`, the readback is the
+   bus's `/Load/State == 1` **plus** `measured >= 0.1` A. **Judge it on the readback, not the
+   POST** — a `vregd` that exits 0
    without moving the fan reports `value_written: 4` and is only visible as an unchanged
    `GET`. A 502 names which of the three failures it was.
 3. **The Tasmota write path** — same, by hand, on `wallbox_relay`. Better proven than it

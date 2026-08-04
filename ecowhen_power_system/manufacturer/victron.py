@@ -255,7 +255,10 @@ class VictronSolarMPPTWithDCLoad(VictronBaseComponent):
     component_states = [
         StateType(basename = 'tracking_state', subaddress='/State', mapping= {0 : 'off', 3: "bulk", 4: "absorbtion", 5: "float"}),
         StateType(basename = 'mppt_mode', subaddress='/Mode', mapping= {0: "ideal", 1: "working", 4: "off"}),
-        StateType(basename = 'load_state', subaddress='/Load/State', mapping= {1: "off", 4: "on", 5: "USER"}),
+        # /Load/State is NOT the VE.Direct register read back. The register (0xEDAB)
+        # takes 0/1/4/5; D-Bus only ever reports 0 or 1, and 1 is the load output
+        # being on. Nothing on the bus represents the register's 4 or 5.
+        StateType(basename = 'load_state', subaddress='/Load/State', mapping= {0: "off", 1: "on"}),
         ]
     vedirect_sets = [
         VeDirectSetType(basename='load_control', register=0xEDAB, allowed_values=[0, 1, 4, 5]),
@@ -263,15 +266,24 @@ class VictronSolarMPPTWithDCLoad(VictronBaseComponent):
     component_actuators = [
         # ASYMMETRIC, and that is a property of this model: /Load/State is read-only,
         # so writes go out over VE.Direct HEX while reads come back over D-Bus — in
-        # *different value spaces*. Writing off is register value 0, but reading off
-        # comes back as /Load/State == 1. A reconcile loop that assumed one number for
-        # "off" would write 0, read 1, call it a mismatch and flap the load until it
-        # exhausted its retries.
+        # *unrelated value spaces*. The register takes 0/1/4/5 and "on" is 4; D-Bus
+        # answers only 0 or 1 and "on" is 1. The bus is not the register read back,
+        # and there is no representation of 4 or 5 on it at all.
+        #
+        # /Load/State says the output is switched on, not that anything is turning,
+        # so it is confirmed against the current actually leaving it — which is what
+        # the predecessor verified this step on, and the half proven on the device.
+        # Both must hold: state 1 AND current flowing.
+        #
+        # min_value is a calibration knob, not a constant: the fans draw 0.1 A, so
+        # the comparison is >= and this number sits exactly on the boundary. Measure
+        # before changing it — lower it and sensor noise reads as a running fan.
         ActuatorType(
             basename='load',
             description='DC load output',
             write=dict(transport='vedirect', vedirect_set='load_control', on=4, off=0),
-            read=dict(transport='dbus', state='load_state'),
+            read=dict(transport='dbus', state='load_state',
+                      confirm=dict(variable='DC_load_current', min_value=0.1)),
         ),
     ]
 

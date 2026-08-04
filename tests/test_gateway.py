@@ -116,7 +116,8 @@ def test_read_only_refuses_actuation_but_still_reads(fake_bus, system_config_fil
 def test_actuators_come_from_the_topology_contract(client):
     body = client.get("/actuators/", headers=AUTH).get_json()
     assert set(body["actuators"]) == {
-        "multiplus_mode", "mppt100_load", "wallbox_relay", "ac_inverter_relay",
+        "multiplus_mode", "mppt100_load",
+        "wallbox_relay", "ac_inverter_relay", "ac_other_relay",
     }
 
 
@@ -198,11 +199,51 @@ def test_reading_maps_the_raw_value_back_to_a_boolean(client, bus_values):
 
 
 def test_an_unrecognised_reading_is_unknown_not_off(client, bus_values):
-    """/Load/State reports 5 for "USER". A service must wait, not assume off."""
-    bus_values[MPPT100]["/Load/State"] = 5
-    body = client.get("/actuators/mppt100_load", headers=AUTH).get_json()
-    assert body["value"] == 5
+    """A service must wait, not assume off. /Mode has no third value, so an
+    unrecognised one is genuinely unknown and there is nothing better to say.
+
+    The fan is the opposite case — see the confirm tests — because there a
+    measurement can settle what the state cannot.
+    """
+    bus_values[MULTIPLUS]["/Mode"] = 2
+    body = client.get("/actuators/multiplus_mode", headers=AUTH).get_json()
+    assert body["value"] == 2
     assert body["on"] is None
+
+
+def test_the_fan_is_on_at_exactly_the_threshold(client, bus_values):
+    """The fans draw 0.1 A, which *is* the threshold, so the comparison must be >=.
+    A `>` here reads a running fan as stopped and the service flaps it forever."""
+    bus_values[MPPT100]["/Load/State"] = 1
+    bus_values[MPPT100]["/Load/I"] = 0.1
+
+    body = client.get("/actuators/mppt100_load", headers=AUTH).get_json()
+
+    assert body["on"] is True
+    assert body["measured"] == 0.1
+
+
+def test_a_fan_that_claims_on_without_current_is_off(client, bus_values):
+    """The failure the confirm exists for: the register took the write, the output
+    says on, and nothing is turning. Reporting off makes the service retry and then
+    fail loudly — reporting null would leave it waiting forever."""
+    bus_values[MPPT100]["/Load/State"] = 1
+    bus_values[MPPT100]["/Load/I"] = 0.0
+
+    body = client.get("/actuators/mppt100_load", headers=AUTH).get_json()
+
+    assert body["on"] is False
+    assert body["measured"] == 0.0
+
+
+def test_the_fan_read_never_uses_the_registers_value_space(client, bus_values):
+    """The bug that jammed the fan on the device: /Load/State == 1 was read as the
+    register's 1 and labelled "off", so a fan that had come up read as still off.
+    The service mismatched every tick, drove again, and burned its retries."""
+    bus_values[MPPT100]["/Load/State"] = 1
+    bus_values[MPPT100]["/Load/I"] = 0.4
+
+    assert client.get("/actuators/mppt100_load", headers=AUTH).get_json()["on"] is True
 
 
 def test_an_unreadable_device_is_an_error_not_a_guess(client, bus_values):
@@ -228,16 +269,17 @@ def test_the_fan_writes_vedirect_with_the_registers_own_off_value(client, vregd_
 
 def test_the_fan_reads_dbus_where_off_is_a_different_number(client, bus_values,
                                                             vregd_calls):
-    """Writing off is register value 0; reading off comes back as /Load/State == 1.
-
-    If these ever collapse to one number a reconcile loop writes 0, reads 1, calls it
-    a mismatch, and flaps the fan until it exhausts its retries.
+    """The register's on is 4, the bus's is 1, and off is 0 on both by coincidence
+    rather than by correspondence. If the read ever collapses back onto the write's
+    value space a reconcile loop calls a correct state a mismatch and flaps the fan.
     """
-    assert bus_values[MPPT100]["/Load/State"] == 1
+    assert bus_values[MPPT100]["/Load/State"] == 0
+    assert bus_values[MPPT100]["/Load/I"] == 0.0
 
     body = client.get("/actuators/mppt100_load", headers=AUTH).get_json()
 
-    assert body == {"actuator": "mppt100_load", "value": 1, "on": False}
+    assert body == {"actuator": "mppt100_load", "value": 0,
+                    "on": False, "measured": 0.0}
     assert vregd_calls == []          # the read never touched VE.Direct
 
 
@@ -258,8 +300,8 @@ def test_a_failing_vregd_is_reported_not_swallowed(client, monkeypatch):
 # Tasmota: one URL declaration, both directions (this is where bug #1 died)
 # ---------------------------------------------------------------------------
 
-def test_tasmota_writes_to_the_url_the_aux_component_declared(client, tasmota_calls):
-    aux = {c.short_name: c for c in config_default.aux_components}
+def test_tasmota_writes_to_the_url_the_component_declared(client, tasmota_calls):
+    aux = {c.short_name: c for c in config_default.system_components}
 
     client.post("/actuators/ac_inverter_relay", json={"on": True}, headers=AUTH)
 
@@ -537,6 +579,28 @@ def test_enabling_one_wallbox_agent_disables_the_others(client):
 def test_a_config_edit_survives_the_round_trip(client, runtime_dirs):
     client.put("/control/config", headers=AUTH, json={"estimated_load_w": 35.0})
     assert client.get("/control/config", headers=AUTH).get_json()["estimated_load_w"] == 35.0
+
+
+def test_the_solar_deadband_is_tunable_over_rest(client, runtime_dirs):
+    """`warn_max_voltage` is where the veto on ac_solar releases, so it has to be a
+    knob rather than a literal — the deadband is calibration, not a design fact."""
+    resp = client.put("/control/config", headers=AUTH,
+                      json={"battery": {"warn_max_voltage": 28.0}})
+
+    assert resp.status_code == 200
+    assert resp.get_json()["battery"]["warn_max_voltage"] == 28.0
+
+
+def test_a_warn_threshold_past_its_limit_is_refused(client, runtime_dirs):
+    """A warn_max above its limit arms nothing and reads as configured. 400, and
+    say which one — the config surface is the only place this can be caught."""
+    resp = client.put("/control/config", headers=AUTH,
+                      json={"battery": {"warn_max_voltage": 29.5}})
+
+    assert resp.status_code == 400
+    assert "max voltage" in resp.get_json()["error"]
+    assert client.get("/control/config",
+                      headers=AUTH).get_json()["battery"]["warn_max_voltage"] == 28.4
 
 
 def test_read_only_refuses_mode_and_config_changes(fake_bus, system_config_file,

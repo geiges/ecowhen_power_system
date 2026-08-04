@@ -218,6 +218,42 @@ def test_a_low_voltage_breach_cuts_the_drains_and_inhibits(config, projection_fa
 def test_an_over_voltage_hard_cuts_mains_to_the_deye(config, projection_factory):
     result = SystemSafetyAgent().run(projection_factory(battery_voltage=30.0), config)
     assert [(c.actuator, c.on) for c in result.commands] == [("ac_inverter_relay", False)]
+    assert [b.mode for b in result.blocks] == ["ac_solar"], (
+        "the cut, and the mode that owns the plug held off so it cannot undo it")
+
+
+def test_the_veto_on_solar_releases_on_the_warn_line_not_the_limit(config,
+                                                                  projection_factory):
+    """The deadband, and the reason it exists: cutting solar lowers the voltage,
+    which clears the breach, which would re-arm the solar. Between the warn
+    threshold and the limit the plug stays off — no cycling on the boundary."""
+    agent = SystemSafetyAgent()
+
+    breaching = agent.run(projection_factory(battery_voltage=30.0), config)
+    assert breaching.commands and breaching.blocks
+
+    # Under the limit, over the warn line: no breach, no command, no inhibit —
+    # and still no solar.
+    easing = agent.run(projection_factory(battery_voltage=28.5), config)
+    assert easing.commands == []
+    assert easing.inhibit == ""
+    assert [b.mode for b in easing.blocks] == ["ac_solar"]
+    assert "28.4" in easing.blocks[0].reason
+
+    settled = agent.run(projection_factory(battery_voltage=27.0), config)
+    assert settled.blocks == []
+
+
+def test_the_deadband_is_read_from_the_config_not_baked_in(config,
+                                                           projection_factory):
+    """28.5 V vetoes at the default 28.4 and does not at 29.0. The thresholds live
+    in `battery` with the limits, so widening a deadband is an edit, not a deploy."""
+    assert SystemSafetyAgent().run(
+        projection_factory(battery_voltage=28.5), config).blocks
+
+    config.battery.warn_max_voltage = 29.0
+    assert SystemSafetyAgent().run(
+        projection_factory(battery_voltage=28.5), config).blocks == []
 
 
 def test_a_quiet_system_neither_commands_nor_inhibits(config, projection_factory):
@@ -424,7 +460,9 @@ def test_a_cycle_publishes_both_status_files(unit, runtime_dirs):
 
     modes = json.loads(runtime_dirs.MODES_STATUS_PATH.read_text())
     services = json.loads(runtime_dirs.SERVICES_STATUS_PATH.read_text())
-    assert set(modes["modes"]) == {"wallbox", "cooling", "ac_on"}
+    assert set(modes["modes"]) == {
+        "wallbox", "ac_solar", "ac_other", "cooling", "ac_on",
+    }
     assert set(services["services"]) == {"ac_inverter", "fan"}
 
 
@@ -597,9 +635,12 @@ def wired(fake_bus, bus_values, runtime_dirs, monkeypatch):
     app.config["TESTING"] = True
     http = app.test_client()
 
-    # vregd, standing in for the fan's VE.Direct register. Writing 4/0 shows up on
-    # D-Bus as 4/1 — the A9 asymmetry, reproduced, because a service that assumed
-    # one number for "off" would flap the fan until its retries ran out.
+    # vregd, standing in for the fan's VE.Direct register. Writing the register's
+    # 4/0 shows up on D-Bus as 1/0 — the A9 asymmetry, reproduced, because the bus
+    # is not the register read back and a service that conflated the two would drive
+    # a running fan until its retries ran out. The load current moves with it: the
+    # state says the output is switched on, current says something is turning, and a
+    # fake that never draws any is a fake fan that never comes on.
     class _Vregd:
         returncode = 0
         stdout = ""
@@ -608,7 +649,8 @@ def wired(fake_bus, bus_values, runtime_dirs, monkeypatch):
     def fake_run(args, **kwargs):
         if "-s" in args:
             written = int(args[args.index("-s") + 2].split(":")[1])
-            bus_values[MPPT100]["/Load/State"] = 4 if written else 1
+            bus_values[MPPT100]["/Load/State"] = 1 if written else 0
+            bus_values[MPPT100]["/Load/I"] = 0.1 if written else 0.0
         return _Vregd()
 
     monkeypatch.setattr(transports.subprocess, "run", fake_run)
@@ -654,12 +696,87 @@ def test_activating_the_wallbox_reaches_the_hardware(wired, runtime_dirs):
 
     assert status["modes"]["wallbox"]["state"] == "active"
     assert wired.bus[MULTIPLUS]["/Mode"] == 3, "derived from the component's mapping"
-    assert wired.bus[MPPT100]["/Load/State"] == 4
+    assert wired.bus[MPPT100]["/Load/State"] == 1, "the bus's on, not the register's 4"
+    assert wired.bus[MPPT100]["/Load/I"] >= 0.1, "and the fan is actually turning"
     assert any(on for on in wired.plugs.values())
 
     services = json.loads(runtime_dirs.SERVICES_STATUS_PATH.read_text())["services"]
     assert services["ac_inverter"]["phase"] == "satisfied"
     assert services["fan"]["phase"] == "satisfied"
+
+
+def test_the_ac_plug_modes_bring_mains_up_first_and_leave_the_fan_alone(wired,
+                                                                       runtime_dirs):
+    """`ac_solar` and `ac_other` each own one plug and share the inverter.
+
+    The fan assertion is the point of the pair: they are not wallbox. A mode that
+    quietly required more than it needs would run the fan for hours for nothing.
+    """
+    from ecowhen_power_system import config_default
+    from conftest import MPPT100, MULTIPLUS
+
+    urls = {c.short_name: getattr(c, "url", None)
+            for c in config_default.system_components}
+    write_state(runtime_dirs, SOC_counted=0.5)
+    wired.bus[MULTIPLUS]["/Mode"] = 4
+
+    for mode in ("ac_solar", "ac_other"):
+        assert wired.http.post(f"/control/modes/{mode}/activate",
+                               headers={"X-API-Key": "k"}).status_code == 200
+
+    for _ in range(6):
+        status = wired.unit.cycle()
+
+    assert status["modes"]["ac_solar"]["state"] == "active"
+    assert status["modes"]["ac_other"]["state"] == "active"
+    assert wired.bus[MULTIPLUS]["/Mode"] == 3, "both needed mains first"
+    assert wired.plugs[f"{urls['ac_inverter']}/cm"] is True, "the Deye's mains"
+    assert wired.plugs[f"{urls['ac_other']}/cm"] is True
+    assert f"{urls['wallbox']}/cm" not in wired.plugs, "neither owns the wallbox"
+    assert wired.bus[MPPT100]["/Load/State"] == 0, "and neither wants the fan"
+
+    # One service, two holders: the inverter stays up until the second lets go.
+    services = json.loads(runtime_dirs.SERVICES_STATUS_PATH.read_text())["services"]
+    assert set(services["ac_inverter"]["requirers"]) == {"ac_solar", "ac_other"}
+
+
+def test_the_spare_socket_yields_to_the_wallbox(wired, runtime_dirs):
+    """End to end: both wanted, one AC budget, and the spare gives way.
+
+    Neither the wallbox nor any agent knows this rule — `ac_other` declares it
+    against itself, and the coordinator resolves it before anything is driven.
+    """
+    from ecowhen_power_system import config_default
+
+    urls = {c.short_name: getattr(c, "url", None)
+            for c in config_default.system_components}
+    other, box = f"{urls['ac_other']}/cm", f"{urls['wallbox']}/cm"
+    write_state(runtime_dirs, SOC_counted=0.5)
+    auth = {"X-API-Key": "k"}
+
+    wired.http.post("/control/modes/ac_other/activate", headers=auth)
+    for _ in range(6):
+        status = wired.unit.cycle()
+    assert status["modes"]["ac_other"]["state"] == "active"
+    assert wired.plugs[other] is True
+
+    wired.http.post("/control/modes/wallbox/activate", headers=auth)
+    for _ in range(6):
+        status = wired.unit.cycle()
+
+    assert wired.plugs[other] is False, "the spare socket let go"
+    assert wired.plugs[box] is True
+    assert status["modes"]["ac_other"]["blockers"] == ["mode:wallbox"]
+    assert status["modes"]["ac_other"]["requesters"] == ["user"], "still wanted"
+
+    # The wallbox finishes; the standing want takes effect again on its own.
+    wired.http.post("/control/modes/wallbox/deactivate", headers=auth)
+    for _ in range(6):
+        status = wired.unit.cycle()
+
+    assert status["modes"]["ac_other"]["state"] == "active"
+    assert wired.plugs[other] is True
+    assert wired.plugs[box] is False
 
 
 def test_a_user_booking_reaches_the_hardware_when_its_interval_opens(wired,
@@ -711,4 +828,4 @@ def test_deactivating_puts_it_all_back(wired, runtime_dirs):
     assert status["modes"]["wallbox"]["state"] == "inactive"
     assert not any(on for on in wired.plugs.values())
     assert wired.bus[MULTIPLUS]["/Mode"] == 4
-    assert wired.bus[MPPT100]["/Load/State"] == 1, "off reads 1, not the 0 written"
+    assert wired.bus[MPPT100]["/Load/I"] == 0.0, "the fan stopped drawing current"

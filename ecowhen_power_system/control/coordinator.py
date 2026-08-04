@@ -4,8 +4,14 @@ Replaces the predecessor's `SequenceRunner` and its `_sleep_with_sequence_ticks`
 special case. There is no separate dispatch path any more — modes and services are
 reconciled on the same clock as everything else.
 
+This module imports nothing from the package, which is why the spike tests carry no
+hardware in their import graph. That is also why the one place here that looks at a
+mode's state compares against a plain string.
+
 Order within a tick matters:
   1. resolve who wants what (agents recomputed each cycle; the user persists),
+  1b. then who says *not* (ModeBlock, and mode-to-mode exclusion) — a second pass,
+      because an exclusion is asked in terms of the positives from 1,
   2. reconcile services — they are what modes wait on,
   3. reconcile modes — they read the services' phase from step 2.
 
@@ -43,6 +49,26 @@ class ModeRequest:
             "mode": self.mode, "active": self.active,
             "agent": self.agent, "reason": self.reason,
         }
+
+
+@dataclass
+class ModeBlock:
+    """A source forbidding a mode this cycle. The mirror of ModeRequest.
+
+    Its own type rather than `ModeRequest(active=False)`, which already means
+    something else and something weaker: an agent that stops wanting a mode says so
+    with `active=False`, and if another agent still wants it the mode stays up. A
+    block is not a withdrawn want — it outvotes every requester.
+
+    Level-triggered like everything else here: recomputed each cycle, so a block
+    that is no longer stated no longer applies.
+    """
+    mode: str
+    agent: str
+    reason: str = ""
+
+    def to_dict(self) -> dict:
+        return {"mode": self.mode, "agent": self.agent, "reason": self.reason}
 
 
 @dataclass
@@ -95,6 +121,7 @@ class Coordinator:
         self.services_status_path = services_status_path
         self.schedule_path = schedule_path
         self._agent_requests = []
+        self._agent_blocks = []
         self._plans = {}                # agent name -> Plan
         self._inhibit_reason = None
 
@@ -107,6 +134,11 @@ class Coordinator:
         mode has, by that silence, released it.
         """
         self._agent_requests = list(requests)
+
+    def set_agent_blocks(self, blocks) -> None:
+        """Replace this cycle's agent-sourced blocks. Same rule as the requests:
+        authoritative, wholesale, and silence means the block is gone."""
+        self._agent_blocks = list(blocks)
 
     def set_plan(self, agent: str, bookings, generated_at=None) -> None:
         """Replace one agent's plan. Wholesale, and only its own.
@@ -252,10 +284,8 @@ class Coordinator:
         sources |= {
             r.agent for r in self._agent_requests if r.mode == name and r.active
         }
-        # ponytail: requesters union — any source is enough, and there is no way to
-        # say "not". If blocking is ever wanted (a user booking that forbids a mode
-        # even while an agent asks for it), it goes here as a second pass over the
-        # same bookings: resolve the positives, then subtract the blocks.
+        # Requesters union — any source is enough. Saying "not" is the second pass,
+        # `_apply_blocks`, which runs once every mode's positives are known.
         sources |= {
             agent for agent, plan in self._plans.items()
             if name in plan.active_modes(t_now)
@@ -281,6 +311,8 @@ class Coordinator:
             for mode in self.modes.values():
                 for source in list(mode.requesters):
                     mode.release(source)
+                for source in list(mode.blockers):
+                    mode.unblock(source)      # nothing is running; nothing to forbid
             return
 
         user_wants = self.read_user_requests()
@@ -294,6 +326,40 @@ class Coordinator:
                 mode.release(source)
             for source in wanted:
                 mode.request(source)
+
+        self._apply_blocks()
+
+    def _apply_blocks(self) -> None:
+        """The second pass: who says *not* this one, and why.
+
+        Recomputed wholesale like the requests, and for the same reason — a block
+        that had to be retracted explicitly would outlive whatever justified it the
+        first time an agent fell silent. Silence permits.
+
+        Runs after every mode's requesters are settled, because an exclusion is
+        asked in terms of them: `ac_other` yields the moment somebody wants the
+        wallbox, not a tick later once the wallbox is up.
+        """
+        for name, mode in self.modes.items():
+            blockers = {b.agent for b in self._agent_blocks if b.mode == name}
+            # `blocked_by` names other modes, and asymmetrically: only one side
+            # declares the exclusion, and that declaration *is* the priority — the
+            # one that yields is the one that says so. Held from the moment the
+            # other is wanted until it is fully back down, so the two do not
+            # overlap while one of them is still winding up or down.
+            blockers |= {
+                f"mode:{other}" for other in mode.blocked_by
+                if other in self.modes and (
+                    self.modes[other].requested
+                    # ModeState is a str enum, and this module imports nothing from
+                    # the package on purpose — see the file docstring.
+                    or self.modes[other].state != "inactive"
+                )
+            }
+            for source in mode.blockers - blockers:
+                mode.unblock(source)
+            for source in blockers:
+                mode.block(source)
 
     def schedule(self, t_now=None) -> dict:
         """The calendar: every outstanding booking, flat, most imminent first.

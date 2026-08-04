@@ -66,6 +66,34 @@ class BatteryConfig(_FromDict):
     # so it is declared rather than derived from the cell spec.
     max_ac_load_w: float = 2500.0
 
+    # The warn thresholds. Not limits — nothing is cut here — but not decoration
+    # either: `warn_max` is where the safety agent starts holding `ac_solar` off,
+    # and it releases there too. The gap to the limit above it *is* the deadband,
+    # and it has to be wide enough that cutting solar cannot drop the value back
+    # under it in one tick, or the plug cycles on the boundary. Alongside the
+    # limits because they are read together and edited together; a warn value on
+    # the wrong side of its limit is caught at load.
+    warn_min_voltage: float = 25.0
+    warn_max_voltage: float = 28.4
+    warn_min_temp: float = 10.0
+    warn_max_temp: float = 40.0
+    warn_max_ac_load_w: float = 2200.0
+
+    def __post_init__(self):
+        for lo, hi, label in (
+            (self.min_voltage, self.warn_min_voltage, "min voltage"),
+            (self.warn_max_voltage, self.max_voltage, "max voltage"),
+            (self.min_temp, self.warn_min_temp, "min temperature"),
+            (self.warn_max_temp, self.max_temp, "max temperature"),
+            (self.warn_max_ac_load_w, self.max_ac_load_w, "max AC load"),
+        ):
+            if lo > hi:
+                raise ValueError(
+                    f"{label}: warn threshold is on the wrong side of the limit "
+                    f"({lo} > {hi}). A warn_max above its limit never arms the "
+                    f"veto; a warn_min below its limit never warns at all."
+                )
+
 
 @dataclass
 class ForecastConfig(_FromDict):

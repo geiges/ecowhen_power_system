@@ -63,10 +63,13 @@ def encode_state_code(state_values, ordered_names) -> str:
     return "".join(digits)
 
 
-def retrieve_aux_data(aux_components, debug=False) -> dict:
-    """Poll the HTTP devices. A component that fails is skipped, not fatal."""
+def retrieve_aux_data(http_components, debug=False) -> dict:
+    """Poll the HTTP devices. A component that fails is skipped, not fatal.
+
+    Still named `aux` because that is where the values land: aux_<date>.csv.
+    """
     data = {}
-    for component in aux_components:
+    for component in http_components:
         try:
             data.update(component.get_labeled_data())
         except Exception as exc:
@@ -199,7 +202,7 @@ def build_state(bus, psystem, system_config, config, simulator, soc_tracker,
         "running_since": running_since.isoformat(),
     }
     state.update(row_data)
-    state.update(retrieve_aux_data(config.aux_components, debug))
+    state.update(retrieve_aux_data(psystem.http_components(), debug))
 
     if simulator is not None:
         sim_row = simulator.update(raw_data=row_data, t_now=t_now, psystem=psystem)

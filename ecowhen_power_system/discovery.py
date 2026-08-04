@@ -45,6 +45,13 @@ def _find_state(component, basename: str, where: str):
     raise ValueError(f"{where}: component {component.short_name!r} has no state {basename!r}")
 
 
+def _find_variable(component, basename: str, where: str):
+    for variable in component.component_variables:
+        if variable.basename == basename:
+            return variable
+    raise ValueError(f"{where}: component {component.short_name!r} has no variable {basename!r}")
+
+
 def _find_vedirect_set(component, basename: str, where: str):
     for vs in component.vedirect_sets:
         if vs.basename == basename:
@@ -62,20 +69,31 @@ def _port_from_service(service: str, where: str) -> str:
     return f"/dev/{tty}"
 
 
-def _resolve_endpoint(spec, component, service, aux, where):
+def _resolve_endpoint(spec, component, service, where):
     """Resolve one half (read or write) of an actuator into a concrete address."""
     transport = spec["transport"]
 
     if transport == "dbus":
         state = _find_state(component, spec["state"], where)
         on, off = _on_off_from_mapping(state.mapping, where)
-        return {
+        endpoint = {
             "transport": "dbus",
             "service": service,
             "path": state.subaddress,
             "on": on,
             "off": off,
         }
+        # A state whose mapping has values that are neither on nor off ("auto",
+        # "USER") cannot decide the question by itself. `confirm` names a variable
+        # that can — the current actually flowing — and only a read declares one.
+        confirm = spec.get("confirm")
+        if confirm:
+            variable = _find_variable(component, confirm["variable"], where)
+            endpoint["confirm"] = {
+                "path": variable.subaddress,
+                "min_value": confirm["min_value"],
+            }
+        return endpoint
 
     if transport == "vedirect":
         vs = _find_vedirect_set(component, spec["vedirect_set"], where)
@@ -99,10 +117,12 @@ def _resolve_endpoint(spec, component, service, aux, where):
         }
 
     if transport == "tasmota":
+        # The component *is* the plug, so the switching address is the one it is
+        # polled at. One declaration, two uses.
         return {
             "transport": "tasmota",
-            "url": aux.url,
-            "fallback_url": aux.fallback_url,
+            "url": component.url,
+            "fallback_url": component.fallback_url,
             "on": TASMOTA_ON,
             "off": TASMOTA_OFF,
         }
@@ -110,7 +130,7 @@ def _resolve_endpoint(spec, component, service, aux, where):
     raise ValueError(f"{where}: unknown transport {transport!r}")
 
 
-def build_actuator_registry(psystem, components_status, aux_by_name):
+def build_actuator_registry(psystem, components_status):
     """Resolve every component's declared actuators into Gateway-consumable addresses.
 
     Each component class declares what *it* can switch (`component_actuators`); the
@@ -125,10 +145,11 @@ def build_actuator_registry(psystem, components_status, aux_by_name):
     registry = {}
 
     for short_name, component in psystem.items():
-        if component.hardware is None:      # A10: not a bus device, nothing to drive
-            continue
-        service = components_status[short_name]["service"]
-        available = components_status[short_name]["available"]
+        # No status entry means the component is not a bus device — an HTTP one,
+        # which is not discovered at all, so assume reachable.
+        status = components_status.get(short_name)
+        service = status["service"] if status else None
+        available = status["available"] if status else True
 
         for decl in component.component_actuators:
             name = f"{short_name}_{decl.basename}"
@@ -139,22 +160,9 @@ def build_actuator_registry(psystem, components_status, aux_by_name):
                 "available": available,
             }
             if available:
-                entry["write"] = _resolve_endpoint(decl.write, component, service, None, where)
-                entry["read"] = _resolve_endpoint(decl.read, component, service, None, where)
+                entry["write"] = _resolve_endpoint(decl.write, component, service, where)
+                entry["read"] = _resolve_endpoint(decl.read, component, service, where)
             registry[name] = entry
-
-    for short_name, aux in aux_by_name.items():
-        for decl in aux.component_actuators:
-            name = f"{short_name}_{decl.basename}"
-            where = f"actuator {name!r}"
-            registry[name] = {
-                "description": decl.description,
-                "aux_component": short_name,
-                # HTTP devices are not discovered; assume reachable.
-                "available": True,
-                "write": _resolve_endpoint(decl.write, None, None, aux, where),
-                "read": _resolve_endpoint(decl.read, None, None, aux, where),
-            }
 
     return registry
 
@@ -253,13 +261,14 @@ def discover(bus, config, run_startup_sequence=True):
             "available": service is not None,
         }
 
-    aux_by_name = {c.short_name: c for c in config.aux_components}
+    # The HTTP devices are components like any other now; `aux_components` survives
+    # as a section of the contract because it is what the Logger splits aux_*.csv on.
     aux_status = {
-        short_name: {"protocol": c.protocol, "variables": c.variable_list}
-        for short_name, c in aux_by_name.items()
+        c.short_name: {"protocol": c.protocol, "variables": c.variable_list}
+        for c in psystem.http_components()
     }
 
-    registry = build_actuator_registry(psystem, components_status, aux_by_name)
+    registry = build_actuator_registry(psystem, components_status)
 
     return {
         "generated_at": datetime.now().isoformat(timespec="seconds"),

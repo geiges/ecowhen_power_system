@@ -23,8 +23,15 @@ settled that convergence takes two ticks on purpose: drive, then confirm on the 
 look via GET.
 
 `on: null` on a read means the device answered with something that is neither the on
-nor the off value — /Load/State can report 5 ("USER"). It is not "off". A caller must
-treat it as unknown and wait rather than drive blind.
+nor the off value — /Load/State can report 5 ("USER") or 1 ("auto"). It is not "off".
+A caller must treat it as unknown and wait rather than drive blind.
+
+Unless the read declares a `confirm`
+-----------------------------------
+Then the state is only a veto and a measurement decides — the fan's /Load/State
+cannot distinguish "auto" from running, so the current on /Load/I does it. Such a
+read is total: `on` is true or false, null only when the hardware is unreadable. That
+matters because a service treats null as "wait", with no retry budget and no timeout.
 """
 from flask import Blueprint, current_app, jsonify, request
 
@@ -92,15 +99,27 @@ def read_actuator(name: str):
         return err
 
     ep = actuator["read"]
-    value, error = transports.read(current_app.config["BUS"], ep)
+    bus = current_app.config["BUS"]
+    value, error = transports.read(bus, ep)
     if error:
         return jsonify({"error": error}), 502
 
-    return jsonify({
-        "actuator": name,
-        "value": value,
-        "on": _as_bool(value, ep["on"], ep["off"]),
-    })
+    body = {"actuator": name, "value": value, "on": _as_bool(value, ep["on"], ep["off"])}
+
+    confirm = ep.get("confirm")
+    if confirm:
+        measured, error = transports.dbus_read_measurement(bus, ep["service"],
+                                                           confirm["path"])
+        if error:
+            return jsonify({"error": error}), 502
+        # Both halves must hold: the output switched on, and current actually
+        # flowing. A state that claims on with nothing flowing reports *off*, so
+        # the service retries and then fails loudly — where reporting null would
+        # leave it waiting forever, since unknown burns no retry budget.
+        body["on"] = body["on"] is True and measured >= confirm["min_value"]
+        body["measured"] = measured        # the number behind the verdict, for 3am
+
+    return jsonify(body)
 
 
 @actuators_bp.post("/<name>")

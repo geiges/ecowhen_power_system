@@ -68,6 +68,7 @@ class ControlUnit:
 
         self._last_planning = None
         self._safety_requests = []
+        self._safety_blocks = []
 
     # --- one cycle ----------------------------------------------------------
 
@@ -110,9 +111,13 @@ class ControlUnit:
             self.coordinator.clear_inhibit()
 
         requests = list(self._safety_requests)
-        requests += self._run_planning(projection, cfg, t_now)
+        blocks = list(self._safety_blocks)
+        planned_requests, planned_blocks = self._run_planning(projection, cfg, t_now)
+        requests += planned_requests
+        blocks += planned_blocks
 
         self.coordinator.set_agent_requests(requests)
+        self.coordinator.set_agent_blocks(blocks)
         status = self.coordinator.tick(cfg, t_now)
 
         self.log.append(build_cycle_entry(state, projection, status))
@@ -137,11 +142,13 @@ class ControlUnit:
             print(f"[control] safety agent raised: {exc}")
             self.coordinator.inhibit(f"safety agent error: {exc}")
             self._safety_requests = []
+            self._safety_blocks = []
             return
 
         print(f"[{result.agent_name}] {result.rationale}")
         self.log.append_agent_result(result)
         self._safety_requests = result.requests
+        self._safety_blocks = result.blocks
 
         for command in result.commands:
             print(f"[control] SAFETY: {command.actuator} -> "
@@ -153,8 +160,11 @@ class ControlUnit:
         else:
             self.coordinator.clear_inhibit()
 
-    def _run_planning(self, projection, cfg, t_now) -> list:
+    def _run_planning(self, projection, cfg, t_now) -> tuple:
         """Fast agents every cycle, slow ones on the planning interval.
+
+        Returns `(requests, blocks)` — an agent that raised or is disabled has said
+        neither, which is what makes both level-triggered.
 
         An agent that runs republishes its plan; one that does not keeps the plan it
         last published. Two cases must therefore drop it explicitly, because
@@ -164,7 +174,7 @@ class ControlUnit:
         due = (self._last_planning is None or
                (t_now - self._last_planning).total_seconds() >= cfg.control_interval_seconds)
 
-        requests = []
+        requests, blocks = [], []
         for agent in self.agents:
             if not agent.is_enabled(cfg):
                 self.coordinator.drop_plan(agent.name)
@@ -181,6 +191,7 @@ class ControlUnit:
             print(f"[{result.agent_name}] {result.rationale}")
             self.log.append_agent_result(result)
             requests += result.requests
+            blocks += result.blocks
             self.coordinator.set_plan(agent.name, result.bookings, t_now)
 
         if due:
@@ -189,7 +200,7 @@ class ControlUnit:
                 save_projection_csv(projection, paths.PROJECTION_PATH)
                 print(BatteryProjector(cfg).summarise(projection))
 
-        return requests
+        return requests, blocks
 
     # --- the loop -----------------------------------------------------------
 

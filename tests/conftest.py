@@ -85,8 +85,8 @@ def _solarcharger(product_name, *, load=False):
         "/Mode": 1,           # working
     }
     if load:
-        values["/Load/I"] = 0.0
-        values["/Load/State"] = 1     # 1 == "off" per the load_state mapping
+        values["/Load/I"] = 0.0       # nothing flowing == the fan is off
+        values["/Load/State"] = 0     # D-Bus reports only 0/1, never the register's 4
     return values
 
 def _DS18B20(product_name, *, load=False):

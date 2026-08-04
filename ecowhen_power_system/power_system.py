@@ -42,7 +42,17 @@ class Power_system(dict):
     
     def get_components(self):
         return self.keys()
-    
+
+    def http_components(self):
+        """The components polled over HTTP instead of the bus.
+
+        `hardware is None` already keeps them out of every bus walk, but it is not
+        what identifies them: the battery is hardware-less too and is polled by
+        nothing. Being able to hand back labelled data is.
+        """
+        return [c for c in self.values() if hasattr(c, "get_labeled_data")]
+
+
     def get_variables_to_log(self, dbus):
         """
         Return a dictionary with all information of available variabless of the current system components. Second

@@ -7,6 +7,10 @@ in three ways, none of which is an ordered list of hardware writes:
     requests   ModeRequest — "I want the wallbox mode, now". Level-triggered and
                recomputed every cycle: silence is release. The fast agents use this,
                because they run on every tick anyway.
+    blocks     ModeBlock — "not `ac_solar`, not while the battery is this hot". The
+               mirror of a request and stronger than one: it outvotes every
+               requester, where `ModeRequest(active=False)` only withdraws this
+               agent's own want. Level-triggered too — silence permits.
     bookings   Booking — "I want the wallbox mode 11:00-15:00". A planning agent
                publishes its whole plan at once and the coordinator asks each tick
                which bookings cover now. The plan stands until that same agent
@@ -44,6 +48,7 @@ class AgentResult:
     rationale: str
     metrics: dict = field(default_factory=dict)
     requests: list = field(default_factory=list)    # list[ModeRequest]  — now
+    blocks: list = field(default_factory=list)      # list[ModeBlock]    — not now
     bookings: list = field(default_factory=list)    # list[Booking]      — ahead
     commands: list = field(default_factory=list)    # list[DirectCommand]
     inhibit: str = ""                               # non-empty → hold all modes off
@@ -54,6 +59,7 @@ class AgentResult:
             "rationale": self.rationale,
             "metrics": self.metrics,
             "requests": [r.to_dict() for r in self.requests],
+            "blocks": [b.to_dict() for b in self.blocks],
             "bookings": [b.to_dict() for b in self.bookings],
             "commands": [c.to_dict() for c in self.commands],
             "inhibit": self.inhibit,

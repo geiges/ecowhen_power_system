@@ -8,10 +8,13 @@ Created on Thu Feb 12 17:04:18 2026
 from dataclasses import dataclass
 
 from .specifications import SPECS_BATTERY_CELL
-from .manufacturer.victron import (VictronMultiplusII, VictronSolarMPPT, 
+from .manufacturer.victron import (VictronMultiplusII, VictronSolarMPPT,
                                   VictronSolarMPPTWithDCLoad, VictronSystem,
                                   VictronPhoenix24_800, VictronBatteryMonitor,
                                   DBusComponent)
+# Not on the bus, but components like any other — one `system_components` list.
+from .manufacturer.tasmota import TasmotaSmartPlug
+from .manufacturer.deye import DeyeSunInverter
 
 class Generic_DS18B20_Temperature_Sensor(DBusComponent):
     """
@@ -58,7 +61,8 @@ class Generic_Battery(object):
     max_safety_temperature : float  # in °C
     max_safety_load_watt : float    # in Watt
     hardware = None
-    
+    component_actuators = []        # nothing to switch, but the registry still asks
+
     def __init__(self,
                  short_name,
                  cell_type,

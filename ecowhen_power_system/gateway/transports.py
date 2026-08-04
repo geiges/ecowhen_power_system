@@ -16,7 +16,7 @@ import requests
 from ..manufacturer.victron import read_number, write_number
 
 TIMEOUT = 10        # s, for the two subprocess transports
-HTTP_TIMEOUT = 3.0  # s, matching aux_components.TasmotaSmartPlug
+HTTP_TIMEOUT = 3.0  # s, matching manufacturer.tasmota.TasmotaSmartPlug
 
 
 # ---------------------------------------------------------------------------
@@ -31,6 +31,15 @@ def dbus_read(bus, ep):
         # the caller must not guess (A7: an unknown readback waits, it does not drive).
         return None, f"{ep['service']}{ep['path']} is unreadable"
     return int(value), None
+
+
+def dbus_read_measurement(bus, service, path):
+    """Read one analogue value. Float, deliberately — `dbus_read` truncates to int
+    because registry states are integers, and 0.1 A of fan current truncates to 0."""
+    value = read_number(bus, service, path)
+    if value is None:
+        return None, f"{service}{path} is unreadable"
+    return float(value), None
 
 
 def dbus_write(bus, ep, value):

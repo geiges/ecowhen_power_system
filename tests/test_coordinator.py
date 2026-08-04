@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from ecowhen_power_system.control.coordinator import (Booking, Coordinator,
-                                                      ModeRequest)
+                                                      ModeBlock, ModeRequest)
 from ecowhen_power_system.control.mode import Mode, ModeState
 from ecowhen_power_system.control.service import ServicePhase, SystemService
 
@@ -64,8 +64,9 @@ class FakeService(SystemService):
 
 
 class FakeMode(Mode):
-    def __init__(self, name, required_services, latency=0):
-        super().__init__(name=name, required_services=required_services)
+    def __init__(self, name, required_services, latency=0, blocked_by=None):
+        super().__init__(name=name, required_services=required_services,
+                         blocked_by=blocked_by)
         self.latency = latency
         self.primary_on = False
         self.primary_calls = []
@@ -76,7 +77,9 @@ class FakeMode(Mode):
         self.primary_calls.append(on)
         if self.latency == 0:
             self.primary_on = on
-        else:
+        elif self._pending != on:
+            # Same idempotence as FakeService: re-applying a target already in
+            # flight must not restart the clock, or a latent mode never converges.
             self._pending = on
             self._ticks_left = self.latency
         return True
@@ -353,6 +356,130 @@ def test_clearing_the_inhibit_lets_modes_come_back():
     coord.set_agent_requests([ModeRequest("wallbox", True, "agent")])
     coord.tick(CONFIG)
     assert modes["wallbox"].state == ModeState.ACTIVE
+
+
+# --- blocking ----------------------------------------------------------------
+
+def test_a_block_outvotes_every_requester_without_releasing_them():
+    """The mirror of a request, and stronger. `ModeRequest(active=False)` only
+    withdraws one agent's want; a block holds the mode off however many still ask,
+    and leaves them asking so the want returns by itself."""
+    coord, services, modes = build(
+        {"ac_solar": dict(required_services=["ac_inverter"])},
+        {"ac_inverter": dict()},
+    )
+    activate(coord, "ac_solar", agent="user_ish")
+    assert modes["ac_solar"].state == ModeState.ACTIVE
+
+    coord.set_agent_requests([ModeRequest("ac_solar", True, "user_ish")])
+    coord.set_agent_blocks([ModeBlock("ac_solar", "system_safety", "battery hot")])
+    coord.tick(CONFIG)
+
+    assert modes["ac_solar"].primary_calls == [True, False], "effect dropped first"
+    assert modes["ac_solar"].state == ModeState.INACTIVE
+    assert modes["ac_solar"].requesters == {"user_ish"}, "still wanted, not released"
+    assert modes["ac_solar"].blockers == {"system_safety"}
+
+    coord.tick(CONFIG)
+    assert services["ac_inverter"].actual is False, "and the service let go after"
+
+
+def test_a_block_is_level_triggered_so_silence_permits():
+    coord, _, modes = build({"ac_solar": dict(required_services=[])}, {})
+    coord.set_agent_requests([ModeRequest("ac_solar", True, "agent")])
+    coord.set_agent_blocks([ModeBlock("ac_solar", "system_safety", "battery hot")])
+    coord.tick(CONFIG)
+    assert modes["ac_solar"].state == ModeState.INACTIVE
+
+    coord.set_agent_blocks([])          # the reading came back down
+    coord.set_agent_requests([ModeRequest("ac_solar", True, "agent")])
+    for _ in range(2):
+        coord.tick(CONFIG)
+
+    assert modes["ac_solar"].state == ModeState.ACTIVE
+    assert modes["ac_solar"].blockers == set()
+
+
+def test_one_mode_excludes_another_from_the_moment_it_is_wanted():
+    """`ac_other` yields to `wallbox` rather than sharing the AC budget with it.
+
+    The declaration is one-sided and that *is* the priority rule — the mode that
+    gives way is the one that says so. It gives way as soon as the wallbox is
+    wanted, not once the wallbox is up, or the two overlap while it winds up.
+    """
+    coord, _, modes = build(
+        {"wallbox": dict(required_services=["ac_inverter"], latency=1),
+         "ac_other": dict(required_services=["ac_inverter"],
+                          blocked_by=["wallbox"])},
+        {"ac_inverter": dict()},
+    )
+    activate(coord, "ac_other")
+    assert modes["ac_other"].state == ModeState.ACTIVE
+
+    coord.set_agent_requests([ModeRequest("ac_other", True, "agent"),
+                              ModeRequest("wallbox", True, "agent")])
+    coord.tick(CONFIG)
+
+    assert modes["ac_other"].blockers == {"mode:wallbox"}
+    assert modes["ac_other"].primary_calls[-1] is False, "yielded on the same tick"
+    # Both move in that one tick, because they share a service that is already up.
+    # This is an exclusion, not a hardware interlock: it keeps the two off each
+    # other over any interval that matters, not within a single tick.
+
+    # The wallbox lets go: the standing want for ac_other takes effect again.
+    coord.set_agent_requests([ModeRequest("ac_other", True, "agent")])
+    for _ in range(4):
+        coord.tick(CONFIG)
+
+    assert modes["wallbox"].state == ModeState.INACTIVE
+    assert modes["ac_other"].state == ModeState.ACTIVE
+
+
+def test_the_exclusion_holds_until_the_other_mode_is_all_the_way_down():
+    """Released is not the same as off. The wallbox plug is still closed while it
+    deactivates, so unblocking on the release alone would overlap the two."""
+    coord, _, modes = build(
+        {"wallbox": dict(required_services=[], latency=2),
+         "ac_other": dict(required_services=[], blocked_by=["wallbox"])},
+        {},
+    )
+    activate(coord, "wallbox")
+    assert modes["wallbox"].state == ModeState.ACTIVE
+
+    coord.set_agent_requests([ModeRequest("ac_other", True, "agent")])
+    coord.tick(CONFIG)
+    assert modes["wallbox"].state == ModeState.DEACTIVATING
+    assert modes["ac_other"].blockers == {"mode:wallbox"}, "still winding down"
+
+    for _ in range(3):
+        coord.tick(CONFIG)
+    assert modes["wallbox"].state == ModeState.INACTIVE
+    assert modes["ac_other"].state == ModeState.ACTIVE
+
+
+def test_an_inhibit_clears_the_blocks_it_makes_redundant():
+    """Everything is off under an inhibit, so a leftover blocker would only be a
+    stale line on the status page."""
+    coord, _, modes = build({"ac_solar": dict(required_services=[])}, {})
+    coord.set_agent_requests([ModeRequest("ac_solar", True, "agent")])
+    coord.set_agent_blocks([ModeBlock("ac_solar", "system_safety", "battery hot")])
+    coord.tick(CONFIG)
+
+    coord.inhibit("battery over-temperature")
+    coord.tick(CONFIG)
+    assert modes["ac_solar"].blockers == set()
+    assert modes["ac_solar"].requesters == set()
+
+
+def test_a_blocked_mode_says_who_is_holding_it_off():
+    coord, _, modes = build({"ac_solar": dict(required_services=[])}, {})
+    coord.set_agent_requests([ModeRequest("ac_solar", True, "agent")])
+    coord.set_agent_blocks([ModeBlock("ac_solar", "system_safety", "battery hot")])
+    status = coord.tick(CONFIG)["modes"]["ac_solar"]
+
+    assert status["blockers"] == ["system_safety"]
+    assert status["requesters"] == ["agent"]
+    assert "blocked by system_safety" in status["detail"]
 
 
 # --- user intent across the process boundary ---------------------------------

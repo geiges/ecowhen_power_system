@@ -114,31 +114,33 @@ system_components = [
     components.Generic_DS18B20_Temperature_Sensor(product_name='1Wire Sensor 28-0000002146e4', 
                                         short_name = 'DS18B20_shunt', 
                                         ),
-    components.Generic_DS18B20_Temperature_Sensor(product_name='1Wire Sensor 28-000000228b7c', 
-                                        short_name = 'DS18B20_inside', 
+    components.Generic_DS18B20_Temperature_Sensor(product_name='1Wire Sensor 28-000000228b7c',
+                                        short_name = 'DS18B20_inside',
                                         ),
-    ]
-
-from . import aux_components as aux_comp
-
-# Auxiliary (non-D-Bus) data sources. Polled by the Power System, same loop as D-Bus.
-aux_components = [
-    aux_comp.TasmotaSmartPlug(
+    # Reached over HTTP rather than the bus. Same list: they are components too,
+    # and discovery tells them apart by what they can do, not by which list they
+    # were declared in.
+    components.TasmotaSmartPlug(
         short_name='wallbox',
         url='http://tasmota-158A57-2647',
         fallback_url='http://192.168.1.185',
         power_scale=0.81,
     ),
-    aux_comp.TasmotaSmartPlug(
+    components.TasmotaSmartPlug(
         short_name='ac_inverter',
         url='http://tasmota-156ecf-3791',
         fallback_url='http://192.168.1.60',
     ),
-    aux_comp.DeyeSunInverter(
+    components.TasmotaSmartPlug(
+        short_name='ac_other',
+        url='http://tasmota-4ec02b-0043',
+        fallback_url='http://192.168.1.249',
+    ),
+    components.DeyeSunInverter(
         short_name='ac_mppt',
         url='http://admin:admin@192.168.1.165/status.html',
     ),
-]
+    ]
 
 # ----------------------------------------------------------------------------
 # Actuators
@@ -155,7 +157,9 @@ aux_components = [
 #   mppt100_load          the mppt100's DC load output — wired to the battery-
 #                         compartment fan
 #   wallbox_relay         the wallbox charging plug
-#   ac_inverter_relay     hard-cuts mains AC to the ac_mppt (Deye) inverter
+#   ac_inverter_relay     mains AC to the ac_mppt (Deye) inverter — the `ac_solar`
+#                         mode owns it, and the safety agent hard-cuts it
+#   ac_other_relay        the spare AC socket — the `ac_other` mode
 #
 # ponytail: the `from config import *` override hook was dropped in the port —
 # no config.py ever existed, and any stray one on sys.path would have silently

@@ -16,7 +16,7 @@ from pathlib import Path
 # derived per row as load current x terminal voltage, the only power the DC load
 # output does not report directly.
 POWER_COLUMNS = ["DC_load_power", "AC_power_output"]
-AUX_POWER_COLUMNS = ["wallbox/power_w", "ac_inverter/power_w"]
+AUX_POWER_COLUMNS = ["wallbox/power_w", "ac_inverter/power_w", "ac_other/power_w"]
 MAX_COLUMNS = ["system/battery_temperature", "system/battery_voltage"]
 MIN_COLUMNS = ["system/battery_voltage"]
 

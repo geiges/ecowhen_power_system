@@ -171,6 +171,7 @@ curl -s -H "X-API-Key: $ECOPS_API_KEY" http://127.0.0.1:5101/actuators/mppt100_l
 
 **Judge it on the second call, not the first.** A POST reports the value it *wrote*;
 a `vregd` that exits 0 without moving the fan looks identical to one that worked.
-On the fan expect `4` written and `4` read; switching off writes `0` and reads `1`,
-which is the write/read asymmetry surviving the round trip. A 502 names the failure
+On the fan expect the register's `4` written and the bus's `1` read, with
+`"measured"` at or above 0.1 A — that current is what proves the fan turns, not the
+state. Switching off writes `0` and reads `0` with `measured` at 0.0. A 502 names the failure
 — `vregd executable not found`, `vregd failed: …`, or `unreachable at […]`.

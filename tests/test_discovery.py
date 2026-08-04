@@ -95,9 +95,10 @@ def test_dbus_actuator_derives_on_off_from_the_component_mapping(system_config):
 def test_fan_actuator_is_asymmetric_write_vedirect_read_dbus(system_config):
     """The one actuator whose read and write disagree — see VictronSolarMPPTWithDCLoad.
 
-    Writing "off" is register value 0; reading "off" comes back as /Load/State == 1.
-    If these ever collapse to one number the reconcile loop will flap the fan, so
-    pin both halves.
+    Writing goes out over VE.Direct (register 0xEDAB, `/Load/State` is read-only on
+    this model) where on is 4; reading comes back over D-Bus, which answers only 0
+    or 1 and where on is 1. The bus is not the register read back. Pin both halves:
+    reading the register's numbers off the bus is what jammed the fan service.
     """
     act = system_config["actuators"]["mppt100_load"]
 
@@ -114,17 +115,21 @@ def test_fan_actuator_is_asymmetric_write_vedirect_read_dbus(system_config):
         "transport": "dbus",
         "service": MPPT100,
         "path": "/Load/State",
-        "on": 4,
-        "off": 1,
+        "on": 1,
+        "off": 0,
+        # …and the state only says the output is switched on, so what it draws
+        # settles whether anything is actually turning.
+        "confirm": {"path": "/Load/I", "min_value": 0.1},
     }
-    assert act["write"]["off"] != act["read"]["off"]
+    # The register's "on" is 4, the bus's is 1. Two value spaces, not one readback.
+    assert act["write"]["on"] != act["read"]["on"]
 
 
-def test_tasmota_actuator_takes_its_url_from_the_aux_component(system_config):
+def test_tasmota_actuator_takes_its_url_from_the_component(system_config):
     """One declaration, two uses. The predecessor had the reading URL and the
     writing URL in separate files; they drifted and the AC hard-cut stopped firing.
     """
-    aux = {c.short_name: c for c in config_default.aux_components}
+    aux = {c.short_name: c for c in config_default.system_components}
 
     wallbox = system_config["actuators"]["wallbox_relay"]
     assert wallbox["write"]["url"] == aux["wallbox"].url

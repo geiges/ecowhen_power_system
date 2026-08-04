@@ -1,4 +1,4 @@
-"""What this installation actually has: two services, two modes.
+"""What this installation actually has: two services, five modes.
 
 The spike's `service.py` / `mode.py` are abstract on purpose — they own the state
 machines and know nothing about hardware. Everything hardware-shaped is here, and it
@@ -11,12 +11,17 @@ Names live on two different layers, and they are deliberately not the same (A8):
     ac_inverter             multiplus_mode
     fan                     mppt100_load
     wallbox (mode)          wallbox_relay
+    ac_solar (mode)         ac_inverter_relay
+    ac_other (mode)         ac_other_relay
     cooling (mode)          — nothing of its own; it only wants the fan
     ac_on (mode)            — nothing of its own; it only wants ac_inverter
 
-`ac_inverter_relay` (the Tasmota that hard-cuts mains to the Deye) is deliberately
-not a service. Only the safety agent touches it, as a direct command at the top
-priority, and nothing in the mode graph may switch it back on by reference counting.
+`ac_inverter_relay` (the Tasmota feeding mains to the Deye) is still deliberately
+*not a service*: it has exactly one owner, the `ac_solar` mode, so it is never
+reference-counted and no second requester can hold it on. The safety agent still
+cuts it as a direct command at the top priority, and its inhibit stands `ac_solar`
+down for as long as the breach lasts — but when the breach clears and the mode is
+still wanted, the mode switches it back on. That is new: it used to take a human.
 """
 from .mode import Mode
 from .service import SystemService
@@ -40,8 +45,9 @@ class ActuatorService(SystemService):
 class ActuatorMode(Mode):
     """A mode whose own effect is one Gateway actuator, gated on its services."""
 
-    def __init__(self, name, actuator, gateway, required_services):
-        super().__init__(name=name, required_services=required_services)
+    def __init__(self, name, actuator, gateway, required_services, blocked_by=None):
+        super().__init__(name=name, required_services=required_services,
+                         blocked_by=blocked_by)
         self.actuator = actuator
         self.gateway = gateway
 
@@ -87,6 +93,19 @@ def build(gateway, config):
             # backwards in a second file.
             ActuatorMode("wallbox", "wallbox_relay", gateway,
                          required_services=["ac_inverter", "fan"]),
+            # Both plugs hang off the Multiplus's AC output, so mains has to be
+            # there before switching one on is worth anything — hence the same
+            # requirement, and hence a mode each rather than a bare actuator POST.
+            # `ac_solar` re-energises the Deye; `ac_other` is the spare socket.
+            ActuatorMode("ac_solar", "ac_inverter_relay", gateway,
+                         required_services=["ac_inverter"]),
+            # Both sockets on one inverter would sit over the AC limit, so the
+            # spare yields to the charger. Declared here and only here: the mode
+            # that gives way is the one that says so, which is the whole priority
+            # rule. `wallbox` knows nothing about it.
+            ActuatorMode("ac_other", "ac_other_relay", gateway,
+                         required_services=["ac_inverter"],
+                         blocked_by=["wallbox"]),
             ServiceOnlyMode(name="cooling", required_services=["fan"]),
             # The user's way to say "I want mains". Same shape as cooling: no
             # actuator of its own, it just holds a reference on ac_inverter, so
