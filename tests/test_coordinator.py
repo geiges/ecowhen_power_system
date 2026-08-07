@@ -295,6 +295,74 @@ def test_failed_prerequisite_does_not_silently_tear_down_the_requirement():
     assert services["ac_inverter"].required_by == {"wallbox"}
 
 
+def test_failed_is_a_dead_end_until_the_user_resets_it(tmp_path):
+    """`failed` never clears itself, and re-requesting does not clear it either.
+
+    The mode still holds its prerequisite, so `require` is a no-op on a name already
+    in the set and the service keeps its burnt retry budget. Only the reset releases
+    it, which is what hands the budget back.
+    """
+    path = tmp_path / "mode_requests.json"
+    path.write_text(json.dumps({"modes": ["wallbox"]}))
+    coord, services, modes = build(
+        {"wallbox": dict(required_services=["ac_inverter"])},
+        {"ac_inverter": dict(accepts=False, max_attempts=2)},
+        mode_requests_path=path,
+    )
+    for _ in range(6):
+        coord.tick(CONFIG)
+    assert modes["wallbox"].state == ModeState.FAILED
+    assert services["ac_inverter"].phase == ServicePhase.FAILED
+    drives_before = len(services["ac_inverter"].drives)
+
+    for _ in range(3):                       # still wanted, and still going nowhere
+        coord.tick(CONFIG)
+    assert len(services["ac_inverter"].drives) == drives_before
+    assert modes["wallbox"].state == ModeState.FAILED
+
+    # The Gateway's `POST /control/modes/wallbox/reset`, on disk.
+    path.write_text(json.dumps({"modes": ["wallbox"], "resets": {"wallbox": "t1"}}))
+    services["ac_inverter"].accepts = True
+    for _ in range(3):
+        coord.tick(CONFIG)
+
+    assert len(services["ac_inverter"].drives) > drives_before
+    assert modes["wallbox"].state == ModeState.ACTIVE
+
+
+def test_a_reset_fires_once_per_token(tmp_path):
+    """The one edge in a level-triggered file. Re-reading the same token must not
+    keep clearing a mode that has failed again since."""
+    path = tmp_path / "mode_requests.json"
+    path.write_text(json.dumps({"modes": ["wallbox"], "resets": {"wallbox": "t1"}}))
+    coord, services, modes = build(
+        {"wallbox": dict(required_services=["ac_inverter"])},
+        {"ac_inverter": dict(accepts=False, max_attempts=1)},
+        mode_requests_path=path,
+    )
+    for _ in range(6):
+        coord.tick(CONFIG)
+    assert modes["wallbox"].state == ModeState.FAILED
+
+    path.write_text(json.dumps({"modes": ["wallbox"], "resets": {"wallbox": "t2"}}))
+    coord.tick(CONFIG)
+    assert modes["wallbox"].state == ModeState.ACTIVATING
+
+
+def test_reset_of_a_mode_that_has_not_failed_does_nothing(tmp_path):
+    """Including every token replayed after a restart, when nothing has failed yet."""
+    path = tmp_path / "mode_requests.json"
+    path.write_text(json.dumps({"modes": ["wallbox"], "resets": {"wallbox": "t1"}}))
+    coord, services, modes = build(
+        {"wallbox": dict(required_services=["ac_inverter"])}, {"ac_inverter": {}},
+        mode_requests_path=path,
+    )
+    for _ in range(3):
+        coord.tick(CONFIG)
+    assert modes["wallbox"].state == ModeState.ACTIVE
+    assert services["ac_inverter"].required_by == {"wallbox"}
+
+
 def test_unreachable_hardware_waits_rather_than_driving_blind():
     """A None readback means we cannot see the device. Writing anyway would mean
     commanding it every tick with no idea whether it landed."""

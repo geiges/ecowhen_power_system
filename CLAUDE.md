@@ -225,6 +225,34 @@ Any agent may also publish `blocks` (see "Saying no"). Safety additionally carri
 (immediate writes) and `inhibit`, both synchronous and neither a booking — and an inhibit
 clears the blocks along with the requesters, since nothing is running to forbid.
 
+### Giving up, and coming back
+
+A service that burns its retry budget goes `failed` and stops driving; a mode whose
+prerequisite failed goes `failed` and **keeps holding it** — a fault is something to look
+at, not a reason to start tearing the system down. That is a genuine dead end and is meant
+to be: nothing clears it on a timer.
+
+**`POST /control/modes/<name>/reset` is the only way out.** Re-requesting the mode is not
+one — the mode never released the service, so `require()` is a no-op on a name already in
+the set and the burnt `_attempts` stays burnt. `Mode.reset` *releases*, and
+`SystemService.release` zeroes the budget; that release is the whole feature. The standing
+want is left in place, so a mode still wanted converges again from the next tick. Reset
+means "try again", not "and stop wanting it" — that is `deactivate`.
+
+Note the two states that are *not* dead ends and need no reset: a mode is only `failed` on
+a **prerequisite**, never on its primary, so a mode whose primary service gave up sits in
+`activating` and is recovered by an ordinary `deactivate` (the release happens on the way
+down). And an *unknown* readback burns no budget at all — that one waits forever instead,
+which is why an actuator that cannot answer needs a `confirm`.
+
+`resets` is a third key in `mode_requests.json`, and the **one edge in an otherwise
+level-triggered file**: mode name → timestamp. The Gateway writes a new token, Control
+fires once per new value and remembers what it acted on in memory. A flag would have to be
+cleared, and clearing it would mean two writers on a file that has exactly one. A restart
+replays every token against modes that are all `inactive`, where `reset` is a no-op — so
+nothing is persisted. `_load_requests` carries `resets` through every other edit, or a
+calendar change would drop a reset Control had not read yet.
+
 ### Cadence
 
 **The tick is 10 s** (`safety_interval_seconds`), and it is the only clock that decides how
@@ -312,6 +340,7 @@ POST /actuators/<name>               {"on": bool}
 GET  /control/modes | /services | /schedule | /modes/requests | /config | /log | /agents
 POST /control/modes/<name>/activate  {} = standing want; {"from","until"} = a booking
 POST /control/modes/<name>/deactivate  drops the standing want AND every booking for it
+POST /control/modes/<name>/reset     clears `failed`; the standing want is left alone
 DELETE /control/modes/bookings/<id>  cancel one booking
 PUT  /control/config                 deep-merge into control_config.yaml
 GET  /files/runtime/… | /files/data/…
@@ -384,7 +413,7 @@ Revert = kill the `ecops` tmux session, restart the old `control_runner.py`.
   still the one setting that changes what an otherwise idle system does, which is why it is a
   knob rather than a literal in `actuation.py`.
 - **The mode graph has never converged against real hardware latency.** Services retry five
-  times, then sit in `failed`.
+  times, then sit in `failed` until someone calls `POST /control/modes/<name>/reset`.
 - **The startup sequence has only run against the fake bus.** The 5 s / 10 s waits are a guess;
   they are class attributes on `VictronMultiplusII`, tunable without touching logic.
 - **There is no process supervision.** `start.sh` opens four tmux windows and holds a crashed

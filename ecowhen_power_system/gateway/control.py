@@ -13,6 +13,7 @@ GET  /control/schedule                  the calendar: every booking ahead of now
 GET  /control/modes/requests            the user's standing intent and bookings
 POST /control/modes/<name>/activate     want <name> now, or {"from","until"} to book it
 POST /control/modes/<name>/deactivate   drop the standing want, and any bookings for it
+POST /control/modes/<name>/reset        clear a mode stuck in `failed` so it retries
 DELETE /control/modes/bookings/<id>     cancel one booking
 GET  /control/config                    control_config.yaml
 PUT  /control/config                    deep-merge a partial update into it
@@ -93,7 +94,8 @@ def get_schedule():
 # Two kinds of user intent, and the difference is whether it ends by itself:
 #   modes     — wanted from now until the user says otherwise
 #   bookings  — wanted over an interval, with an id so one can be cancelled
-_EMPTY_REQUESTS = {"modes": [], "bookings": []}
+#   resets    — mode name -> timestamp, the one edge in this file (see /reset)
+_EMPTY_REQUESTS = {"modes": [], "bookings": [], "resets": {}}
 
 
 @control_bp.get("/modes/requests")
@@ -122,6 +124,9 @@ def _load_requests() -> dict:
     return {
         "modes": list(payload.get("modes", [])),
         "bookings": list(payload.get("bookings", [])),
+        # Carried through every edit: dropping it here would lose a reset that
+        # Control had not read yet the moment anyone touched their calendar.
+        "resets": dict(payload.get("resets", {})),
     }
 
 
@@ -210,6 +215,33 @@ def deactivate_mode(name: str):
     payload["modes"] = [m for m in payload["modes"] if m != name]
     payload["bookings"] = [b for b in payload["bookings"] if b.get("mode") != name]
     return _save_requests(payload, now())
+
+
+@control_bp.post("/modes/<name>/reset")
+def reset_mode(name: str):
+    """Clear a mode stuck in `failed` so it converges again.
+
+    Deliberately a separate verb from activate: `failed` is a dead end on purpose,
+    and re-requesting the mode does not clear it — the mode never let go of its
+    prerequisite services, so their retry budgets stay burnt. Only the release in
+    `Mode.reset` hands those back.
+
+    This leaves the standing want alone. Reset means "try again", not "and stop
+    wanting it"; somebody who wants it off says `deactivate`.
+
+    The value is a timestamp rather than a flag because the rest of this file is
+    level-triggered state and a reset is an edge. Control fires once per new value
+    and remembers what it acted on, so nothing here has to be cleared afterwards —
+    which would mean two writers on a file that has exactly one.
+    """
+    refusal = _refuse_if_read_only() or _refuse_if_unknown(name)
+    if refusal:
+        return refusal
+
+    t_now = now()
+    payload = _load_requests()
+    payload["resets"][name] = t_now.isoformat()
+    return _save_requests(payload, t_now)
 
 
 @control_bp.delete("/modes/bookings/<booking_id>")

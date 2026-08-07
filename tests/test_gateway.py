@@ -390,6 +390,27 @@ def test_activating_a_mode_writes_the_durable_request_file(client, runtime_dirs)
     assert json.loads(runtime_dirs.MODE_REQUESTS_PATH.read_text())["modes"] == []
 
 
+def test_resetting_a_mode_writes_a_token_and_leaves_the_want_alone(client, runtime_dirs):
+    """Reset means "try again", not "and stop wanting it" — the standing request
+    stays, so the mode comes back up once its services have their budget back.
+
+    A timestamp rather than a flag: the rest of this file is level-triggered, Control
+    fires once per new value, and nothing here has to clear it afterwards.
+    """
+    client.post("/control/modes/wallbox/activate", headers=AUTH)
+    body = client.post("/control/modes/wallbox/reset", headers=AUTH).get_json()
+    assert body["modes"] == ["wallbox"]
+    assert "wallbox" in body["resets"]
+
+    first = body["resets"]["wallbox"]
+    again = client.post("/control/modes/wallbox/reset", headers=AUTH).get_json()
+    assert again["resets"]["wallbox"] != first
+
+    # An unrelated edit must not drop a reset Control has not read yet.
+    after = client.post("/control/modes/cooling/activate", headers=AUTH).get_json()
+    assert after["resets"]["wallbox"] == again["resets"]["wallbox"]
+
+
 def test_an_unknown_mode_is_refused_once_control_has_published(client, runtime_dirs):
     runtime_dirs.MODES_STATUS_PATH.write_text(json.dumps({"modes": {"wallbox": {}}}))
 

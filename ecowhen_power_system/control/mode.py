@@ -166,6 +166,26 @@ class Mode(ABC):
             # nothing on the status page explains why it will not come up.
             self._detail = f"blocked by {', '.join(sorted(self._blockers))}"
 
+    def reset(self, services: dict) -> None:
+        """Clear a mode that gave up, so it may be tried again.
+
+        `failed` is a dead end by design — nothing clears it on a timer, because a
+        mode that exhausted its prerequisites' retries is a fault somebody should
+        look at. But it needs a way *out*, and re-requesting it is not one: the mode
+        never released its services (see `reconcile`), so `require` is a no-op on a
+        name already in the set and the service keeps its burnt budget.
+
+        The release is therefore the whole of this method — `SystemService.release`
+        zeroes `_attempts`, so a mode still wanted converges again from the next
+        tick, and one nobody wants any more simply stays down.
+        """
+        if self._state != ModeState.FAILED:
+            return
+        for service in self._mine(services):
+            service.release(self.name)
+        self._state = ModeState.INACTIVE
+        self._detail = "reset"
+
     def reconcile(self, services: dict, config) -> ModeStatus:
         mine = self._mine(services)
 

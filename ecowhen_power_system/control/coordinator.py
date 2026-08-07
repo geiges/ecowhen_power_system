@@ -123,6 +123,7 @@ class Coordinator:
         self._agent_requests = []
         self._agent_blocks = []
         self._plans = {}                # agent name -> Plan
+        self._seen_resets = {}          # mode name -> the reset token acted on
         self._inhibit_reason = None
 
     # --- intake -------------------------------------------------------------
@@ -216,6 +217,29 @@ class Coordinator:
         except (KeyError, TypeError, ValueError):
             return None
 
+    def _apply_resets(self) -> None:
+        """Act on the user's "try that one again", once per request.
+
+        The only thing that lifts a mode out of `failed`, and manual on purpose —
+        see `Mode.reset`. This is the one edge in an otherwise entirely
+        level-triggered file, so the Gateway writes a token per mode (its
+        timestamp) rather than a flag it would then have to clear, and the memory
+        of what has already been acted on lives here. That keeps the single-producer
+        rule on `mode_requests.json` intact: Control still only reads it.
+
+        A restart replays every token in the file against modes that are all
+        `inactive`, where `reset` is a no-op — so nothing has to be persisted.
+        """
+        resets = self._read_user_file().get("resets") or {}
+        if not isinstance(resets, dict):
+            return
+        for name, token in resets.items():
+            if self._seen_resets.get(name) == token:
+                continue
+            self._seen_resets[name] = token
+            if name in self.modes:
+                self.modes[name].reset(self.services)
+
     def _read_user_file(self) -> dict:
         if self.mode_requests_path is None:
             return {}
@@ -247,6 +271,9 @@ class Coordinator:
 
     def tick(self, config, t_now=None) -> dict:
         t_now = t_now or self._now()
+        # Before the requests, and unconditionally: a failed mode does not leave
+        # `failed` through any other path, inhibited or not.
+        self._apply_resets()
         self._apply_requests(t_now)
         # After resolution, not before: `covers` already ignores an ended booking, so
         # pruning is housekeeping for the published calendar — and it has to run
