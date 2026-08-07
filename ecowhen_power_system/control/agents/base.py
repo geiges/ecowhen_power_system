@@ -4,9 +4,10 @@ The predecessor's `AgentResult` carried `actions` (raw actuator writes) and
 `sequences` (a named step list to run). Both are gone; an agent now expresses intent
 in three ways, none of which is an ordered list of hardware writes:
 
-    requests   ModeRequest — "I want the wallbox mode, now". Level-triggered and
-               recomputed every cycle: silence is release. The fast agents use this,
-               because they run on every tick anyway.
+    requests   ModeRequest — "I want the wallbox mode, now". Level-triggered, and
+               recomputed every time the agent *runs*: silence is release. An agent
+               that did not run this tick has not fallen silent — its last answer
+               stands until it speaks again, exactly as its bookings do.
     blocks     ModeBlock — "not `ac_solar`, not while the battery is this hot". The
                mirror of a request and stronger than one: it outvotes every
                requester, where `ModeRequest(active=False)` only withdraws this
@@ -21,8 +22,14 @@ in three ways, none of which is an ordered list of hardware writes:
                service to converge.
     inhibit    a reason string. Non-empty holds every mode off until it clears.
 
-`fast_cycle` is a cadence knob — how often the agent is asked, nothing more. It does
-not change how its output is treated.
+`interval_seconds` is a cadence knob — how often the agent is asked, nothing more. It
+does not change how its output is treated. Each agent declares its own (0 = every
+tick) and any of them can be overridden from `control_config.yaml`, so a planner that
+costs a projection per run does not have to be paid for on the safety clock.
+
+The agent does not hold that clock. `run` stays a pure function of
+`(projection, config)` — which is why an agent test needs no fixtures — and
+`ControlUnit` remembers when each one last ran.
 
 `rationale` and `metrics` are unchanged and still the point of the decision log: what
 the system did is worth much less than why.
@@ -68,7 +75,7 @@ class AgentResult:
 
 class BaseAgent(ABC):
     name: str = ""
-    fast_cycle: bool = False    # True → every safety interval; False → planning only
+    interval_seconds: int = 0   # 0 → every tick
 
     @abstractmethod
     def run(self, projection, config) -> AgentResult:
@@ -79,3 +86,13 @@ class BaseAgent(ABC):
         if agent_cfg is None:
             return True
         return bool(agent_cfg.enabled)
+
+    def interval(self, config) -> int:
+        """How often this agent wants to be asked, in seconds.
+
+        Same lookup as `is_enabled`: the class attribute is the declaration, the
+        config field the override, and an agent with no config entry keeps its own.
+        """
+        agent_cfg = getattr(config.agents, self.name, None)
+        override = getattr(agent_cfg, "interval_seconds", None)
+        return int(self.interval_seconds if override is None else override)

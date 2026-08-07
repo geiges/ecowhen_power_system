@@ -65,8 +65,8 @@ control/                config, state, forecast, projection, gateway_client, ser
                         package, so the spike tests carry no hardware in their import graph),
                         actuation (this installation's services + modes), agents/, decision_log.
 tools/replay.py         Score estimator changes against recorded CSVs. Use this, not argument.
-deploy/                 push / install / start / doctor / compare. CUTOVER.md is the runbook,
-                        README.md the reasoning behind the deployment's shape.
+deploy/                 push / install / start / doctor / compare. README.md is the procedure
+                        and the reasoning behind the deployment's shape.
 ```
 
 ## The two contracts
@@ -87,7 +87,10 @@ derived clamp values are `battery/*`. Anything wanting the number the estimator 
 `battery/voltage`.
 
 Durable: `soc_state.json`, `mode_requests.json`, `control_config.yaml`, `control_log.jsonl`,
-the CSVs. Everything else is regenerated at startup.
+the CSVs. Everything else is regenerated at startup. `control_log.jsonl` is the one durable
+file that is *bounded* rather than kept — `log_max_entries` (200), trimmed amortised, so it
+holds between N and 2N lines. It is a scrollback, not an archive; the time series is in the
+CSVs.
 
 ## Actuators, services, modes
 
@@ -181,8 +184,12 @@ labels, which is why the fan is the one actuator declaring them per-actuator.
 Agents name modes and nothing else — no actuator, no value, no ordering. There are two ways
 to want a mode, and both are resolved level-triggered on every tick:
 
-- **`ModeRequest(mode, active, agent, reason)`** — "now". Recomputed wholesale each cycle, so
-  **silence is release**. The fast agents use it; they run every tick anyway.
+- **`ModeRequest(mode, active, agent, reason)`** — "now". Recomputed wholesale every time its
+  agent *runs*, so **silence is release** — measured from that agent's own last run, not from
+  the tick. An agent that did not run this tick has not fallen silent: `control_main` latches
+  each agent's last `(requests, blocks)` and answers for it, which is what makes a per-agent
+  interval safe. Without that latch a five-minute agent would release the wallbox on the
+  twenty-nine ticks between its runs and re-request it on the thirtieth.
 - **`Booking(mode, start, end, reason)`** — an interval, `end` exclusive. An agent publishes
   its whole plan at once via `coordinator.set_plan(agent, bookings)`, and the coordinator asks
   each tick which bookings cover *now*.
@@ -199,8 +206,9 @@ one that does not keeps the plan it last published.** So a planning agent may ru
 
 Three bounds stop a plan outliving its author: a booking ends at its own `end` (pruned each
 tick), an agent that **raises** has its plan dropped, and an agent that becomes **disabled**
-has its plan dropped. The last two are explicit in `control_main._run_planning` — nothing
-else would do it.
+has its plan dropped. The last two are explicit in `control_main._forget` — nothing else would
+do it — and they drop the latched requests along with the plan, because both are how an agent
+speaks. Dropping half would leave a switched-off agent still holding the wallbox on.
 
 An **inhibit suppresses the calendar, it does not delete it.** Requesters are released, the
 plans stay; when the inhibit clears, bookings still covering now take effect again.
@@ -215,8 +223,35 @@ activating at `start` and its services converge over the next tick or two.
 
 Any agent may also publish `blocks` (see "Saying no"). Safety additionally carries `commands`
 (immediate writes) and `inhibit`, both synchronous and neither a booking — and an inhibit
-clears the blocks along with the requesters, since nothing is running to forbid. `fast_cycle`
-is only a cadence knob — it does not change how output is treated.
+clears the blocks along with the requesters, since nothing is running to forbid.
+
+### Cadence
+
+**The tick is 10 s** (`safety_interval_seconds`), and it is the only clock that decides how
+fast the mode graph converges: bringing the wallbox up costs four ticks — declare,
+prerequisites satisfied, primary required, plug confirmed — which was four minutes at 60 s and
+is forty seconds now. `state.json` is republished every 5 s, so every tick sees fresh
+measurements.
+
+**Every agent runs on its own `interval_seconds`**, declared on the agent class (0 = every
+tick) and overridable per agent in `control_config.yaml`, where `null` means "the agent's
+own" so the default is written down once. The clock lives in `ControlUnit`, not on the agent —
+`run` stays a pure function of `(projection, config)`, which is why an agent test needs no
+fixtures. **Safety is the exception and is not configurable**: it runs every tick outside the
+agent loop, because its `commands` and `inhibit` are applied synchronously.
+`control_interval_seconds` now gates only the projection CSV and its printed summary.
+
+Two things this changed that are easy to miss: a service's `max_attempts = 5` counts *ticks*,
+so the retry budget is a 50 s window rather than a 5 min one (it only burns on a successful
+read that disagrees — an unknown read costs nothing); and the loop is
+`sleep(interval - elapsed)`, so an overrun degrades to back-to-back rather than queueing.
+
+**`log_max_entries` and the agent intervals are coupled**, which is why it is 200 and not a
+rounder number. The log fills at roughly two entries a tick (the cycle line plus safety), so
+200 is ~16 minutes — comfortably past the 300 s planning interval. `GET /control/agents` finds
+each agent's last result by scanning that file, so anything under ~60 makes the planners
+intermittently read as `last_result: null`. Shortening an agent's interval is free here;
+lengthening one past ~8 minutes means raising this too.
 
 ## Things that will bite you
 
@@ -254,6 +289,11 @@ is only a cadence knob — it does not change how output is treated.
   Control's `GatewayClient` reads the same variable, so an unset key makes every command fail
   and every readback come back unknown. `ECOWHEN_DATA_API_KEY` is a *different* key, for the
   solar forecast; without it the forecast agents just report "inactive".
+- **The forecast provider times its *attempts*, not its results.** A success is held for
+  `cache_minutes` (60), a failure for `retry_minutes` (5). Without the second clock a failed
+  fetch was retried every cycle — three `requests.get` at `timeout=10`, which on a 10 s loop
+  means the control loop does nothing else for as long as computepi is down. The cost is that
+  a forecast that comes back is picked up up to 5 minutes late.
 - **There must be no `.python-version` file.** `uv sync` silently rebuilds `.venv` on the
   interpreter it names, losing `--system-site-packages` and with it `gi`. `install.sh` asserts
   this after syncing. `requires-python = ">=3.12"` is the real constraint.
@@ -279,7 +319,9 @@ GET  /files/runtime/… | /files/data/…
 
 `/control/agents` is each agent with its `enabled` flag and the last thing it said, and the
 agent list comes from `ControlConfig.agents`' own fields — adding an agent there is the only
-edit needed.
+edit needed. It finds "the last thing it said" by scanning `control_log.jsonl` backwards, so
+**`log_max_entries` has to cover the slowest agent's interval** or a planner reads as
+`last_result: null` — see below.
 
 **Two file endpoints, and the split matters to consumers:** `runtime` serves the contracts
 (`state.json`, `system_configuration.yaml`, the status files), `data` serves the durable time
@@ -301,7 +343,7 @@ would break the single-producer rule on that file.
 ## Working here
 
 ```bash
-uv run python -m pytest tests/     # 166 tests, green. Keep it that way.
+uv run python -m pytest tests/     # 189 tests, green. Keep it that way.
 uv run ecops-power-system --once   # single poll; --no-startup-sequence to never write the bus
 uv run ecops-control --dry-run     # run every agent, command nothing
 uv run ecops-logger --once
@@ -325,47 +367,10 @@ predecessor to be **confirmed stopped** — two writers on one actuator is the o
 dangerous failure mode here. `deploy/compare.py` diffs `state.json` against the predecessor's;
 `deploy/doctor.sh` is for venv/`gi` problems.
 
-**Status:** phases ①–③ have run on the device in parallel mode. ④ has not and cannot until the
-cutover — it is the exclusive step.
-
-### The cutover
-
-**`deploy/CUTOVER.md` is the runbook** — the ordered command sequence to follow at the box.
-What follows is the summary; that file is what you actually work from.
-
-Stop the predecessor's `control_runner.py` — confirm it is stopped, not merely quiet — then
-`ECOPS_PARALLEL=0 ./deploy/start.sh --restart --no-control`. Revert = kill the `ecops` tmux
-session, restart the old runner.
-
-**`--no-control` is not optional ceremony.** The write transports can only be proven by hand,
-and they cannot be proven while Control runs: its coordinator drives every service back to
-target on each tick, so a hand-switched fan goes off again within 60 s and the test tells you
-nothing. Prove them first, then `./deploy/start.sh --restart` brings Control up.
-
-Four things run for the first time in that first minute. Watch them in this order:
-
-1. **The startup sequence**, if the Multiplus's DC measurements are missing — it wakes the
-   inverter, energising AC output for a few seconds.
-2. **`vregd`** — the fan's VE.Direct **write**, and only the write: `mppt100_load` reads over
-   D-Bus, and it is the only VE.Direct actuator, so `vedirect_read` is never reached and
-   `int(token, 0)` never runs. What is unproven is that `vregd` is on PATH and that
-   `vregd -c <port> -s 0xEDAB un8:4` is the right syntax. `POST /actuators/mppt100_load
-   {"on": true}` by hand, then `GET`: the write is the register's `4`, the readback is the
-   bus's `/Load/State == 1` **plus** `measured >= 0.1` A. **Judge it on the readback, not the
-   POST** — a `vregd` that exits 0
-   without moving the fan reports `value_written: 4` and is only visible as an unchanged
-   `GET`. A 502 names which of the three failures it was.
-3. **The Tasmota write path** — same, by hand, on `wallbox_relay`. Better proven than it
-   looks: `aux_components` already polls these plugs at `{url}/cm?cmnd=Status%208` with the
-   same URL-and-fallback pair, and that ran on the device, so the addresses and the `/cm`
-   endpoint hold. New here are `cmnd=Power 1` and reading the `POWER` key back. Its old
-   failure mode was silently doing nothing; the Gateway answers 502 instead.
-4. **Control's first tick**, which switches the Multiplus **off** if no mode wants it. That is
-   correct for this installation — `services.multiplus_ac_default_on: false` is intended, not a
-   default nobody looked at. Expect the inverter to go off, and do not read it as a fault.
-
-Then let it run: `GET /control/modes`, `/control/services` and `/control/schedule` say what it
-thinks it is doing, and `data/control_log.jsonl` says why.
+**Status:** cut over. All four processes run on the device with full control
+(`ECOPS_PARALLEL=0`); the predecessor is stopped. `GET /control/modes`, `/control/services`
+and `/control/schedule` say what it thinks it is doing, and `data/control_log.jsonl` says why.
+Revert = kill the `ecops` tmux session, restart the old `control_runner.py`.
 
 ## Open
 
@@ -378,11 +383,6 @@ thinks it is doing, and `data/control_log.jsonl` says why.
   behaviour for this installation, so `services.multiplus_ac_default_on` stays `false`. It is
   still the one setting that changes what an otherwise idle system does, which is why it is a
   knob rather than a literal in `actuation.py`.
-- **The Gateway's `vregd` and Tasmota *write* transports have never run**, on device or off —
-  parallel mode 403s every POST. The unproven parts are narrower than they look: `vregd`'s
-  presence and `-s` syntax (the read path is D-Bus, so `vedirect_read` is unreachable), and
-  Tasmota's `cmnd=Power 1` (the URLs and `/cm` are already proven by the aux polling). Check
-  both by hand at the cutover, judging on the readback rather than the POST.
 - **The mode graph has never converged against real hardware latency.** Services retry five
   times, then sit in `failed`.
 - **The startup sequence has only run against the fake bus.** The 5 s / 10 s waits are a guess;

@@ -103,6 +103,10 @@ class ForecastConfig(_FromDict):
     mppt100_file: str = "forecast_solar_yield_5312439980_mppt100.csv"
     mppt_AC_file: str = "forecast_solar_yield_5312439980_balcony.csv"
     cache_minutes: int = 60
+    # How soon a *failed* fetch is retried. Shorter than cache_minutes so a
+    # forecast that comes back is picked up promptly, long enough that three
+    # 10 s HTTP timeouts cannot occupy a 10 s control loop.
+    retry_minutes: int = 5
     max_age_hours: int = 6
 
 
@@ -131,22 +135,38 @@ class ServicesConfig(_FromDict):
 
 
 @dataclass
+class _AgentConfig(_FromDict):
+    """What every agent has: whether it runs, and how often.
+
+    `interval_seconds` is `None` rather than a number so the agent class stays the
+    one place its cadence is declared — a default written down twice is the bug
+    `_FromDict` exists to avoid. Set it here only to overrule the agent.
+    """
+    enabled: bool = False
+    interval_seconds: int = None      # None → the agent's own declaration
+
+
+@dataclass
 class SystemSafetyConfig(_FromDict):
+    """Deliberately *not* an `_AgentConfig`: safety has no interval knob.
+
+    It runs every tick, outside the agent loop, because its commands and its
+    inhibit are applied synchronously. A settable interval here would be a knob
+    that reads as configured and does nothing.
+    """
     enabled: bool = True
     confirmed_disable: bool = False   # both flags required to actually disable
 
 
 @dataclass
-class SocWallboxChargeConfig(_FromDict):
-    enabled: bool = False
+class SocWallboxChargeConfig(_AgentConfig):
     soc_on_threshold: float = 0.99    # SOC considered "full"
     soc_on_minutes: int = 30          # minutes at full before requesting the wallbox
     soc_off_threshold: float = 0.25   # SOC below which the wallbox is released
 
 
 @dataclass
-class ForecastWallboxConfig(_FromDict):
-    enabled: bool = False
+class ForecastWallboxConfig(_AgentConfig):
     wallbox_power_w: float = 1600.0
     max_periods_per_day: int = 2
     inverter_efficiency: float = 0.93
@@ -156,8 +176,7 @@ class ForecastWallboxConfig(_FromDict):
 
 
 @dataclass
-class WallboxOptimalChargeConfig(_FromDict):
-    enabled: bool = False
+class WallboxOptimalChargeConfig(_AgentConfig):
     wallbox_power_w: float = 1600.0
     inverter_efficiency: float = 0.93
     horizon_days: int = 4
@@ -183,8 +202,26 @@ class AgentsConfig:
 
 @dataclass
 class ControlConfig:
-    safety_interval_seconds: int = 60
+    # The tick. Everything else here is a wall clock, so this only sets how quickly
+    # the mode graph converges: bringing the wallbox up costs four ticks — declare,
+    # prerequisites satisfied, primary required, plug confirmed — which was four
+    # minutes at 60 s. Sustainable at 10 s because the loop's real cost is five
+    # actuator reads and one projection, and because an agent that cannot afford
+    # that cadence now says so itself (`interval_seconds`).
+    safety_interval_seconds: int = 10
+    # Only the projection CSV and its printed summary hang off this now; the agents
+    # each keep their own interval.
     control_interval_seconds: int = 300
+    # `control_log.jsonl` is durable and had no bound at all. At a 10 s tick it
+    # grows by two entries a tick, so it needs one. Trimming is amortised — see
+    # DecisionLog — and this is a scrollback, not an archive: the time series
+    # lives in the CSVs.
+    #
+    # 200 rather than a round 30 because `GET /control/agents` finds each agent's
+    # last result by scanning this file. Two entries a tick is ~16 minutes here,
+    # comfortably past the 300 s planning interval; anything under ~60 and the
+    # planners intermittently read as `last_result: null`.
+    log_max_entries: int = 200
     horizon_hours: int = 96
     estimated_load_w: float = 20.0
     # Past this, `state.json` is not a description of the present. Control treats

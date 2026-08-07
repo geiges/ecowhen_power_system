@@ -125,7 +125,7 @@ def _plan_windows(
 
 class ForecastWallboxAgent(BaseAgent):
     name = "forecast_wallbox"
-    fast_cycle = False      # planning cycles only
+    interval_seconds = 300      # a projection per run; the forecast moves hourly
 
     def run(self, projection, config) -> AgentResult:
         if projection.forecast is None or not projection.steps:

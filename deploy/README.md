@@ -1,10 +1,5 @@
 # Deploying phases 1–3 beside the live system
 
-> **Following the procedure rather than reading about it?** `CUTOVER.md` in this
-> directory is the ordered runbook, end to end. This file is the reference behind
-> it — why parallel mode is an interlock, how the two halves of the D-Bus bindings
-> fail differently, and what `.python-version` does to a venv.
-
 The predecessor keeps running and keeps control of the hardware. This deployment
 only *reads*, so both can sit on the same bus and every number can be compared
 against a working reference.

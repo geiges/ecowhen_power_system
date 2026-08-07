@@ -97,9 +97,20 @@ def _merge(mppt150: dict, mppt100: dict, mppt_AC: dict) -> list:
 
 
 class SolarForecastProvider:
+    """Hourly-cached solar forecast, with its own clock on the failures too.
+
+    A successful fetch is held for `cache_minutes`. A *failed* one used to hold
+    nothing, so the next cycle tried all three files again — three `requests.get` at
+    10 s each. That is survivable on a one-minute loop and not on a ten-second one:
+    while computepi is down the control loop would do nothing but time out. So the
+    attempt is what is timed, not the result, and a failure is retried on its own
+    shorter interval.
+    """
+
     def __init__(self, config):
         self._cfg = config
         self._cache = None
+        self._last_attempt = None
 
     def get(self):
         if self._cache is not None:
@@ -107,6 +118,12 @@ class SolarForecastProvider:
             if age_min < self._cfg.cache_minutes:
                 return self._cache
 
+        if self._last_attempt is not None:
+            since_min = (now() - self._last_attempt).total_seconds() / 60
+            if since_min < self._cfg.retry_minutes:
+                return self._stale_or_none()
+
+        self._last_attempt = now()
         try:
             fresh = self._fetch()
         except Exception as exc:

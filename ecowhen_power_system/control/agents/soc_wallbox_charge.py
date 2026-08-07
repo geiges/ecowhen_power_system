@@ -41,7 +41,7 @@ class SocWallboxChargeAgent(BaseAgent):
     soc_off_threshold."""
 
     name = "soc_wallbox_charge"
-    fast_cycle = True
+    interval_seconds = 0        # cheap, and it is the one that says "charge now"
 
     def run(self, projection, config) -> AgentResult:
         current = projection.current

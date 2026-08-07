@@ -14,6 +14,10 @@ One cycle, in order:
 
     reload config → read state → safety → forecast+projection → agents → tick
 
+Safety runs every cycle. Every other agent runs on its own `interval_seconds`, and
+the ones that did not run this cycle still speak through their latched last answer —
+see `_run_planning`, where that latch is the reason an interval is safe at all.
+
 The tick is `Coordinator.tick`, which is where ordering lives: modes declare what
 they need, services converge, modes then act on services that are already satisfied.
 Nothing in this file knows that the wallbox needs the inverter first.
@@ -64,9 +68,11 @@ class ControlUnit:
             WallboxOptimalChargeAgent(),
         ]
         self.forecast_provider = SolarForecastProvider(config.forecast)
-        self.log = DecisionLog(paths.DECISION_LOG_PATH)
+        self.log = DecisionLog(paths.DECISION_LOG_PATH, config.log_max_entries)
 
         self._last_planning = None
+        self._last_run = {}          # agent name -> when it last ran
+        self._last_output = {}       # agent name -> its latest (requests, blocks)
         self._safety_requests = []
         self._safety_blocks = []
 
@@ -85,6 +91,8 @@ class ControlUnit:
             return
         self.services["multiplus_ac"].default_on = self.config.services.multiplus_ac_default_on
         self.services["mppt100_dc_load"].default_on = self.config.services.mppt100_dc_load_default_on
+        # Or it would read as configured and need a restart to take effect.
+        self.log.max_entries = self.config.log_max_entries
 
     def cycle(self, t_now=None) -> dict:
         self.reload_config()
@@ -161,39 +169,56 @@ class ControlUnit:
             self.coordinator.clear_inhibit()
 
     def _run_planning(self, projection, cfg, t_now) -> tuple:
-        """Fast agents every cycle, slow ones on the planning interval.
+        """Ask each agent that is due, and answer for all of them.
 
-        Returns `(requests, blocks)` — an agent that raised or is disabled has said
-        neither, which is what makes both level-triggered.
+        Every agent runs on its own clock — `interval_seconds`, 0 meaning every
+        tick — so a planner that costs several projections is not paid for on the
+        safety cadence. The clock lives here rather than on the agent, which keeps
+        `run` a pure function of `(projection, config)`.
 
-        An agent that runs republishes its plan; one that does not keeps the plan it
-        last published. Two cases must therefore drop it explicitly, because
-        otherwise a plan nobody is maintaining keeps driving hardware until each
-        booking's own end: an agent that has been disabled, and one that raised.
+        Returns `(requests, blocks)` for *every* enabled agent, not only the ones
+        that ran this tick. That latch is what makes an interval safe: the
+        coordinator resolves requests wholesale each tick, so an agent absent from
+        this list has released its modes. Without the latch a five-minute agent
+        would release the wallbox on the twenty-nine ticks between its runs and
+        re-request it on the thirtieth. An agent that did not run has not fallen
+        silent — its last answer stands until it speaks again, which is exactly how
+        its bookings already behaved.
+
+        Silence therefore still releases; it is now measured from the agent's own
+        last run. Three things still end an agent's say, and all three drop the
+        latched answer along with the plan: its interval elapsing with a new answer,
+        being disabled, and raising.
         """
-        due = (self._last_planning is None or
-               (t_now - self._last_planning).total_seconds() >= cfg.control_interval_seconds)
-
         requests, blocks = [], []
         for agent in self.agents:
             if not agent.is_enabled(cfg):
-                self.coordinator.drop_plan(agent.name)
+                self._forget(agent.name)
                 continue
-            if not (agent.fast_cycle or due):
-                continue
-            try:
-                result = agent.run(projection, cfg)
-            except Exception as exc:
-                # It has told us nothing, so it no longer speaks for the future.
-                print(f"[control] agent {agent.name} raised: {exc}")
-                self.coordinator.drop_plan(agent.name)
-                continue
-            print(f"[{result.agent_name}] {result.rationale}")
-            self.log.append_agent_result(result)
-            requests += result.requests
-            blocks += result.blocks
-            self.coordinator.set_plan(agent.name, result.bookings, t_now)
 
+            last = self._last_run.get(agent.name)
+            if last is None or (t_now - last).total_seconds() >= agent.interval(cfg):
+                self._last_run[agent.name] = t_now
+                try:
+                    result = agent.run(projection, cfg)
+                except Exception as exc:
+                    # It has told us nothing, so it no longer speaks — for the
+                    # future via its plan, or for now via its latched answer.
+                    print(f"[control] agent {agent.name} raised: {exc}")
+                    self._forget(agent.name)
+                    continue
+                print(f"[{result.agent_name}] {result.rationale}")
+                self.log.append_agent_result(result)
+                self._last_output[agent.name] = (result.requests, result.blocks)
+                self.coordinator.set_plan(agent.name, result.bookings, t_now)
+
+            latched = self._last_output.get(agent.name)
+            if latched is not None:
+                requests += latched[0]
+                blocks += latched[1]
+
+        due = (self._last_planning is None or
+               (t_now - self._last_planning).total_seconds() >= cfg.control_interval_seconds)
         if due:
             self._last_planning = t_now
             if projection.steps:
@@ -202,11 +227,21 @@ class ControlUnit:
 
         return requests, blocks
 
+    def _forget(self, agent_name: str) -> None:
+        """Drop everything an agent still speaks through: its plan and its latch.
+
+        Both, or half of a disabled agent's opinion keeps driving hardware.
+        """
+        self.coordinator.drop_plan(agent_name)
+        self._last_output.pop(agent_name, None)
+
     # --- the loop -----------------------------------------------------------
 
     def run_forever(self) -> None:
+        intervals = ", ".join(f"{a.name}={a.interval(self.config)}s"
+                              for a in self.agents)
         print(f"[control] starting — cycle={self.config.safety_interval_seconds}s, "
-              f"planning={self.config.control_interval_seconds}s, "
+              f"agents: {intervals}, "
               f"gateway={self.config.gateway.base_url}")
         while True:
             t_start = now()

@@ -149,7 +149,7 @@ def _plan_day(battery, solar_w: list, base_load_w: float, wallbox_w: float,
 
 class WallboxOptimalChargeAgent(BaseAgent):
     name = "wallbox_optimal_charge"
-    fast_cycle = False      # planning cycles only
+    interval_seconds = 300      # several projections per run
 
     def __init__(self, data_dir: Path = None):
         self.data_dir = data_dir if data_dir is not None else paths.DATA_DIR

@@ -505,12 +505,14 @@ def test_the_user_request_file_activates_a_mode(unit, runtime_dirs):
 
 def _slow_agent(bookings_from, bookings_until):
     """A planning agent that publishes one booking and counts its own runs."""
-    from ecowhen_power_system.control.agents.base import AgentResult
+    from ecowhen_power_system.control.agents.base import AgentResult, BaseAgent
     from ecowhen_power_system.control.coordinator import Booking
 
-    class Slow:
+    # Subclasses the real base class rather than restating its protocol: an agent
+    # gained `interval` and a duplicate would have kept passing until it didn't.
+    class Slow(BaseAgent):
         name = "forecast_wallbox"
-        fast_cycle = False
+        interval_seconds = 300
         runs = 0
         enabled = True
 
@@ -593,6 +595,128 @@ def test_an_agent_that_raises_stops_driving_its_plan(unit, runtime_dirs):
     agent.run = boom
     unit.cycle(t_now=now() + timedelta(minutes=10))   # forces a planning cycle
     assert unit.modes["wallbox"].requesters == set()
+
+
+# ---------------------------------------------------------------------------
+# Per-agent intervals, and the latch that makes them safe
+# ---------------------------------------------------------------------------
+
+def _interval_agent(seconds):
+    """An agent on its own clock that wants the wallbox *now*, not on a calendar."""
+    from ecowhen_power_system.control.agents.base import AgentResult, BaseAgent
+    from ecowhen_power_system.control.coordinator import ModeRequest
+
+    class Periodic(BaseAgent):
+        name = "forecast_wallbox"
+        interval_seconds = seconds
+        runs = 0
+        enabled = True
+
+        def is_enabled(self, config):
+            return self.enabled
+
+        def run(self, projection, config):
+            Periodic.runs += 1
+            return AgentResult(
+                agent_name=self.name, rationale="wants it",
+                requests=[ModeRequest("wallbox", True, self.name, "test")])
+
+    return Periodic()
+
+
+def test_an_agent_runs_on_its_own_interval_not_every_tick(unit, runtime_dirs):
+    write_state(runtime_dirs)
+    t = now()
+    agent = _interval_agent(300)
+    unit.agents = [agent]
+
+    for i in range(4):
+        unit.cycle(t_now=t + timedelta(seconds=10 * i))
+    assert agent.runs == 1
+
+    unit.cycle(t_now=t + timedelta(seconds=300))
+    assert agent.runs == 2
+
+
+def test_a_slow_agents_request_survives_the_ticks_between_its_runs(unit, runtime_dirs):
+    """The latch. Without it a 5-minute agent releases the wallbox 29 ticks out of 30.
+
+    The coordinator resolves requests wholesale every tick and treats absence as
+    release, so an agent that did not run must still be answered for.
+    """
+    write_state(runtime_dirs)
+    t = now()
+    unit.agents = [_interval_agent(300)]
+
+    for i in range(4):
+        unit.cycle(t_now=t + timedelta(seconds=10 * i))
+        assert unit.modes["wallbox"].requesters == {"forecast_wallbox"}, \
+            "the mode must not flap on the ticks between the agent's runs"
+
+
+def test_a_slow_agent_that_changes_its_mind_is_heard_on_its_next_run(unit,
+                                                                    runtime_dirs):
+    """Latched is not latched forever: a run replaces the answer wholesale."""
+    write_state(runtime_dirs)
+    t = now()
+    agent = _interval_agent(300)
+    unit.agents = [agent]
+
+    unit.cycle(t_now=t)
+    assert unit.modes["wallbox"].requesters == {"forecast_wallbox"}
+
+    from ecowhen_power_system.control.agents.base import AgentResult
+    agent.run = lambda projection, config: AgentResult(
+        agent_name=agent.name, rationale="not any more")
+
+    unit.cycle(t_now=t + timedelta(seconds=60))
+    assert unit.modes["wallbox"].requesters == {"forecast_wallbox"}, \
+        "not due yet — the old answer still stands"
+
+    unit.cycle(t_now=t + timedelta(seconds=300))
+    assert unit.modes["wallbox"].requesters == set()
+
+
+def test_a_disabled_agent_drops_its_latched_request_too(unit, runtime_dirs):
+    """The plan and the latch are both how an agent speaks. Dropping half of it
+    would leave a switched-off agent still holding the wallbox on."""
+    write_state(runtime_dirs)
+    t = now()
+    agent = _interval_agent(300)
+    unit.agents = [agent]
+
+    unit.cycle(t_now=t)
+    assert unit.modes["wallbox"].requesters == {"forecast_wallbox"}
+
+    agent.enabled = False
+    unit.cycle(t_now=t + timedelta(seconds=10))
+    assert unit.modes["wallbox"].requesters == set()
+
+
+def test_an_agent_that_raises_drops_its_latched_request_too(unit, runtime_dirs):
+    write_state(runtime_dirs)
+    t = now()
+    agent = _interval_agent(300)
+    unit.agents = [agent]
+
+    unit.cycle(t_now=t)
+    assert unit.modes["wallbox"].requesters == {"forecast_wallbox"}
+
+    def boom(projection, config):
+        raise RuntimeError("nope")
+
+    agent.run = boom
+    unit.cycle(t_now=t + timedelta(seconds=300))
+    assert unit.modes["wallbox"].requesters == set()
+
+
+def test_the_interval_is_overridable_from_the_config(unit, runtime_dirs):
+    agent = _interval_agent(300)
+    unit.config.agents.forecast_wallbox.interval_seconds = 30
+    assert agent.interval(unit.config) == 30
+
+    unit.config.agents.forecast_wallbox.interval_seconds = None
+    assert agent.interval(unit.config) == 300, "None means the agent's own"
 
 
 def test_an_inhibit_suppresses_the_calendar_without_deleting_it(unit, runtime_dirs):
@@ -854,3 +978,69 @@ def test_deactivating_puts_it_all_back(wired, runtime_dirs):
     assert not any(on for on in wired.plugs.values())
     assert wired.bus[MULTIPLUS]["/Mode"] == 4
     assert wired.bus[MPPT100]["/Load/I"] == 0.0, "the fan stopped drawing current"
+
+
+# ---------------------------------------------------------------------------
+# The forecast provider's own clock
+# ---------------------------------------------------------------------------
+
+def test_a_failed_forecast_fetch_is_not_retried_every_cycle(monkeypatch):
+    """Three 10 s HTTP timeouts per cycle would occupy the whole 10 s loop.
+
+    So the *attempt* is what is timed, not the result: while computepi is down the
+    provider answers from `retry_minutes` and touches the network on that clock only.
+    """
+    from ecowhen_power_system.control.forecast import SolarForecastProvider
+
+    provider = SolarForecastProvider(ControlConfig().forecast)
+    attempts = []
+
+    def boom():
+        attempts.append(now())
+        raise RuntimeError("computepi unreachable")
+
+    provider._fetch = boom
+
+    t = now()
+    for i in range(6):
+        monkeypatch.setattr("ecowhen_power_system.control.forecast.now",
+                            lambda t=t + timedelta(seconds=10 * i): t)
+        assert provider.get() is None
+    assert len(attempts) == 1, "one attempt per retry_minutes, not one per cycle"
+
+    monkeypatch.setattr("ecowhen_power_system.control.forecast.now",
+                        lambda: t + timedelta(minutes=6))
+    provider.get()
+    assert len(attempts) == 2, "and it does try again once the interval has passed"
+
+
+# ---------------------------------------------------------------------------
+# The decision log's bound
+# ---------------------------------------------------------------------------
+
+def test_the_decision_log_keeps_only_the_last_entries(tmp_path):
+    """Bounded, and trimmed amortised — the file sits between N and 2N lines.
+
+    Rewriting on every append would cost the box's flash N times what appending
+    does, which is the opposite of what bounding the file is for.
+    """
+    from ecowhen_power_system.control.decision_log import DecisionLog
+
+    log = DecisionLog(tmp_path / "control_log.jsonl", max_entries=30)
+    for i in range(200):
+        log.append({"agent": "cycle", "i": i})
+        assert len(log._path.read_text().splitlines()) <= 60
+
+    entries = log.tail(100)
+    assert len(entries) <= 60
+    assert entries[-1]["i"] == 199, "the newest entry always survives"
+    assert log.tail(30)[0]["i"] >= 200 - 60, "and the oldest are the ones dropped"
+
+
+def test_an_unbounded_decision_log_still_grows(tmp_path):
+    from ecowhen_power_system.control.decision_log import DecisionLog
+
+    log = DecisionLog(tmp_path / "control_log.jsonl")
+    for i in range(100):
+        log.append({"agent": "cycle", "i": i})
+    assert len(log.tail(1000)) == 100

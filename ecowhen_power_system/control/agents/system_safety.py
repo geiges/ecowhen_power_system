@@ -48,7 +48,8 @@ _MAX_VETOES = ["ac_solar"]
 
 class SystemSafetyAgent(BaseAgent):
     name = "system_safety"
-    fast_cycle = True
+    interval_seconds = 0        # every tick, and not negotiable: its commands and
+                                # its inhibit are applied synchronously
 
     def __init__(self):
         self.heat_memory = {"cooling_AC_load": 0}

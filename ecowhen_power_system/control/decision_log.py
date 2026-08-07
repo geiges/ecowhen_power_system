@@ -13,13 +13,49 @@ from .config import now
 
 
 class DecisionLog:
-    def __init__(self, path: Path):
+    """Append-only, bounded to the last `max_entries` — but not on every write.
+
+    Rewriting the file to drop one line would multiply what this costs the box's
+    flash by the number of lines kept: the same 30 entries re-serialised on every
+    append. So the trim is *amortised* — append cheaply, and once every
+    `max_entries` writes rewrite the file down to the last `max_entries` lines. The
+    file therefore holds between N and 2N entries and the extra bytes written work
+    out at roughly one duplicate of each line, which is the price of bounding it.
+
+    `max_entries=None` keeps the old unbounded behaviour.
+    """
+
+    def __init__(self, path: Path, max_entries: int = None):
         self._path = path
+        self.max_entries = max_entries
+        self._since_trim = 0
 
     def append(self, entry: dict) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         with open(self._path, "a") as f:
             f.write(json.dumps(entry) + "\n")
+
+        if not self.max_entries:
+            return
+        self._since_trim += 1
+        if self._since_trim >= self.max_entries:
+            self._trim()
+            self._since_trim = 0
+
+    def _trim(self) -> None:
+        """Keep the last `max_entries` lines. Written whole, then renamed, so a
+        reader (the Gateway serves this file) never sees a half-written log."""
+        try:
+            with open(self._path) as f:
+                lines = f.readlines()
+        except OSError:
+            return
+        if len(lines) <= self.max_entries:
+            return
+        tmp = self._path.with_suffix(self._path.suffix + ".tmp")
+        with open(tmp, "w") as f:
+            f.writelines(lines[-self.max_entries:])
+        tmp.replace(self._path)
 
     def append_agent_result(self, result, timestamp: str = None) -> None:
         self.append({
