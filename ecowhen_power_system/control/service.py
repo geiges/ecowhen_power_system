@@ -114,7 +114,12 @@ class SystemService(ABC):
         actual = self.read_actual_on(config)
 
         if actual is None:
-            self._phase = ServicePhase.CONVERGING
+            # Converging only if there is something to converge to. A device nobody
+            # wants, at rest, that cannot be read is *idle* — calling it "converging"
+            # showed the three unreachable plugs as permanently on their way
+            # somewhere on /control/services.
+            self._phase = (ServicePhase.CONVERGING if self._requirers
+                           else ServicePhase.IDLE)
             self._detail = "hardware state unknown — cannot verify"
             return self.status()
 

@@ -25,12 +25,18 @@ class ActuatorRegistry:
     supposed to start before this process — but it also gets restarted on its own,
     and a Gateway holding addresses from a previous boot would fail every write with
     a confusing message. Stat-per-request is cheap next to a D-Bus round trip.
+
+    It also carries `state`, what each actuator last read — see `actuators.py`. It
+    lives here rather than in a module global so it is per-app (a test client gets an
+    empty one) and so a topology change clears it: new addresses, new hardware, and
+    nothing worth remembering about the old ones.
     """
 
     def __init__(self, path):
         self.path = path
         self._mtime = None
         self._actuators = {}
+        self.state = {}             # name -> (body, http_status, monotonic)
 
     def current(self) -> dict:
         try:
@@ -41,6 +47,7 @@ class ActuatorRegistry:
             config = discovery.load_system_configuration(self.path)
             self._actuators = config.get("actuators", {})
             self._mtime = mtime
+            self.state.clear()
             logging.info("gateway: loaded %d actuators from %s",
                          len(self._actuators), self.path)
         return self._actuators

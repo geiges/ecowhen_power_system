@@ -264,6 +264,54 @@ def get_config():
         ControlConfig.load_or_default(paths.CONTROL_CONFIG_PATH)))
 
 
+def _current_config_dict() -> dict:
+    """The file as it stands, or the defaults if Control has not written one yet.
+
+    The file rather than `asdict(load_or_default())` so a key this build does not
+    know is carried through an edit instead of being dropped.
+    """
+    if paths.CONTROL_CONFIG_PATH.exists():
+        with open(paths.CONTROL_CONFIG_PATH) as f:
+            return yaml.safe_load(f) or {}
+    return dataclasses.asdict(ControlConfig())
+
+
+@control_bp.get("/control_mode")
+def get_control_mode():
+    """`control_mode`, on its own. Named for the config key, not `/mode`, which
+    sits one character from `/modes/<name>` and means something else entirely."""
+    cfg = ControlConfig.load_or_default(paths.CONTROL_CONFIG_PATH)
+    return jsonify({"control_mode": cfg.control_mode})
+
+
+@control_bp.put("/control_mode")
+def put_control_mode():
+    """The dashboard's auto/manual switch.
+
+    `PUT /control/config` can already set it; this is the one-key version so a
+    button is one call that cannot accidentally carry the rest of the config with
+    it. The value is validated by `ControlConfig` itself — one place, not two.
+    """
+    refusal = _refuse_if_read_only()
+    if refusal:
+        return refusal
+
+    value = (request.get_json(silent=True) or {}).get("control_mode")
+    if not isinstance(value, str):
+        return jsonify({"error": "control_mode must be a string: 'auto' or 'manual'"}), 400
+
+    current = _current_config_dict()
+    current["control_mode"] = value
+    try:
+        updated = ControlConfig.from_dict(current)
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    updated.save(paths.CONTROL_CONFIG_PATH)
+    # Control picks it up on its next tick — `reload_config` runs every cycle.
+    return jsonify({"control_mode": updated.control_mode})
+
+
 @control_bp.put("/config")
 def put_config():
     if current_app.config.get("READ_ONLY"):
@@ -286,12 +334,7 @@ def put_config():
                      "in the same request",
         }), 400
 
-    if paths.CONTROL_CONFIG_PATH.exists():
-        with open(paths.CONTROL_CONFIG_PATH) as f:
-            current = yaml.safe_load(f) or {}
-    else:
-        current = dataclasses.asdict(ControlConfig())
-
+    current = _current_config_dict()
     _deep_update(current, body)
 
     agents_update = body.get("agents", {})

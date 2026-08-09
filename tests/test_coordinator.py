@@ -379,6 +379,17 @@ def test_unreachable_hardware_waits_rather_than_driving_blind():
     assert "unknown" in services["ac_inverter"].status().detail
 
 
+def test_unreadable_and_unwanted_is_idle_not_converging():
+    """Converging toward what? Nothing requires it and it is already at its default.
+    Calling that "converging" showed the unreachable plugs as permanently on their
+    way somewhere."""
+    coord, services, _ = build({}, {"ac_inverter": dict(unreachable=True)})
+    coord.tick(CONFIG)
+
+    assert services["ac_inverter"].phase == ServicePhase.IDLE
+    assert services["ac_inverter"].drives == []
+
+
 # --- safety ------------------------------------------------------------------
 
 def test_inhibit_deactivates_modes_and_lets_services_revert():

@@ -125,6 +125,7 @@ class Coordinator:
         self._plans = {}                # agent name -> Plan
         self._seen_resets = {}          # mode name -> the reset token acted on
         self._inhibit_reason = None
+        self._manual = False
 
     # --- intake -------------------------------------------------------------
 
@@ -271,6 +272,20 @@ class Coordinator:
 
     def tick(self, config, t_now=None) -> dict:
         t_now = t_now or self._now()
+
+        # Manual: control keeps its hands off. Not an inhibit — an inhibit releases
+        # the requesters and lets every service revert to its default, which *is* a
+        # write, and "off" is not what someone switching to manual asked for. This
+        # pauses instead: no reconcile, so nothing is driven, and the modes keep
+        # their states so auto resumes where it left off rather than from scratch.
+        # `getattr` because this module duck-types config — see the file docstring.
+        self._manual = bool(getattr(config, "manual", False))
+        if self._manual:
+            status = self.status()
+            self._persist(status)
+            self._persist_schedule(t_now)
+            return status
+
         # Before the requests, and unconditionally: a failed mode does not leave
         # `failed` through any other path, inhibited or not.
         self._apply_resets()
@@ -410,6 +425,9 @@ class Coordinator:
 
     def status(self) -> dict:
         return {
+            # On the status page because a frozen mode graph reads as a bug
+            # otherwise: "active, and nothing is converging" needs the reason.
+            "control_mode": "manual" if self._manual else "auto",
             "inhibited": self.inhibited,
             "inhibit_reason": self._inhibit_reason,
             "modes": {n: m.status().to_dict() for n, m in self.modes.items()},
@@ -419,6 +437,7 @@ class Coordinator:
     def _persist(self, status) -> None:
         for path, payload in (
             (self.modes_status_path, {"modes": status["modes"],
+                                      "control_mode": status["control_mode"],
                                       "inhibited": status["inhibited"],
                                       "inhibit_reason": status["inhibit_reason"]}),
             (self.services_status_path, {"services": status["services"]}),

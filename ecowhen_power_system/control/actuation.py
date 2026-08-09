@@ -50,7 +50,18 @@ class ActuatorService(SystemService):
         self.gateway = gateway
 
     def read_actual_on(self, config):
-        return self.gateway.read(self.actuator)
+        """The Gateway's remembered reading — the hardware only when it must be.
+
+        It answers from memory, refreshed by every write, which is why a settled
+        system touches no hardware at all. The one case memory cannot resolve is an
+        actuator that read *unknown* while something is waiting on it: nothing will
+        write it (a service never drives blind), so nothing would ever refresh the
+        entry and the service would wait forever on a device that may have come back.
+        """
+        on = self.gateway.read(self.actuator)
+        if on is None and self.required_by:
+            return self.gateway.read(self.actuator, fresh=True)
+        return on
 
     def drive(self, on, config):
         return self.gateway.command(self.actuator, on)

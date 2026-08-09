@@ -10,15 +10,18 @@ never inline. The predecessor grew 46 inline `CurrentState(...)` constructions a
 one added field turned its whole suite red.
 """
 import json
-from datetime import timedelta
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
 
 from ecowhen_power_system.control import actuation
+from ecowhen_power_system.control.agents import forecast_ac_solar
+from ecowhen_power_system.control.agents.forecast_ac_solar import AC_SolarScheduler
 from ecowhen_power_system.control.agents.soc_wallbox_charge import SocWallboxChargeAgent
 from ecowhen_power_system.control.agents.system_safety import SystemSafetyAgent
-from ecowhen_power_system.control.config import ControlConfig, now
+from ecowhen_power_system.control.config import TZ, ControlConfig, now
+from ecowhen_power_system.control.forecast import HourlyEntry, SolarForecast
 from ecowhen_power_system.control.coordinator import Coordinator
 from ecowhen_power_system.control.state import (CurrentState, StateUnavailableError,
                                                 read_current_state)
@@ -40,11 +43,15 @@ class FakeGateway:
     def __init__(self, latency=0, unreachable=()):
         self.actual = {}
         self.commands = []
+        self.reads = []
         self.latency = latency
         self.unreachable = set(unreachable)
         self._pending = {}
 
-    def read(self, actuator):
+    def read(self, actuator, fresh=False):
+        # `fresh` is the real client's "go to the device, not to your memory". There
+        # is no memory here, so every read is already fresh.
+        self.reads.append((actuator, fresh))
         if actuator in self.unreachable:
             return None
         if actuator in self._pending:
@@ -94,9 +101,22 @@ def state_factory():
 
 @pytest.fixture
 def projection_factory(state_factory):
-    def make(**overrides):
-        return SimpleNamespace(current=state_factory(**overrides), forecast=None,
+    def make(forecast=None, **overrides):
+        return SimpleNamespace(current=state_factory(**overrides), forecast=forecast,
                                horizon_hours=96, steps=[])
+    return make
+
+
+@pytest.fixture
+def forecast_factory():
+    """An hourly forecast of balcony watts. The other two strings stay at zero —
+    nothing that reads a forecast here cares what the roof does."""
+    def make(balcony_w, start):
+        return SolarForecast(fetched_at=start, entries=[
+            HourlyEntry(time=start + timedelta(hours=i),
+                        mppt150_w=0.0, mppt100_w=0.0, mppt_AC_w=w)
+            for i, w in enumerate(balcony_w)
+        ])
     return make
 
 
@@ -296,6 +316,115 @@ def test_a_low_battery_releases_it(config, projection_factory):
 
 
 # ---------------------------------------------------------------------------
+# The AC solar agent — threshold, and the switching budget
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def ac_solar_clock(monkeypatch):
+    """Pin the agent's clock to 08:00 so no window can fall over midnight.
+
+    Windows are capped *per day*, so a test run at 23:00 would otherwise split a
+    contiguous run in two and the counts below would be lies about the code.
+    """
+    t = TZ.localize(datetime(2026, 8, 8, 8, 0))
+    monkeypatch.setattr(forecast_ac_solar, "now", lambda: t)
+    return t
+
+
+def _windows(result):
+    return [(b.start.hour, b.end.hour) for b in result.bookings]
+
+
+def test_no_forecast_means_the_agent_says_nothing(config, projection_factory):
+    result = AC_SolarScheduler().run(projection_factory(), config)
+    assert result.bookings == []
+    assert "no solar forecast" in result.rationale
+
+
+def test_the_window_covers_exactly_the_hours_above_the_threshold(
+        config, projection_factory, forecast_factory, ac_solar_clock):
+    # 08 09 10 11 12 13
+    forecast = forecast_factory([20, 90, 150, 400, 120, 60], start=ac_solar_clock)
+    result = AC_SolarScheduler().run(
+        projection_factory(forecast=forecast), config)
+
+    assert _windows(result) == [(10, 13)]        # end exclusive: off at 13:00
+    assert [b.mode for b in result.bookings] == ["ac_solar"]
+
+
+def test_the_threshold_is_configurable(config, projection_factory,
+                                       forecast_factory, ac_solar_clock):
+    forecast = forecast_factory([20, 90, 150, 400, 120, 60], start=ac_solar_clock)
+    config.agents.forecast_ac_solar.min_yield_w = 50.0
+    result = AC_SolarScheduler().run(
+        projection_factory(forecast=forecast), config)
+
+    assert _windows(result) == [(9, 14)]
+
+
+def test_a_gap_below_the_threshold_splits_the_day_in_two(
+        config, projection_factory, forecast_factory, ac_solar_clock):
+    #                    08   09   10  11   12   13
+    forecast = forecast_factory([200, 200, 10, 200, 200, 10], start=ac_solar_clock)
+    result = AC_SolarScheduler().run(
+        projection_factory(forecast=forecast), config)
+
+    assert _windows(result) == [(8, 10), (11, 13)]
+
+
+def test_a_third_run_is_merged_into_its_nearest_neighbour_not_dropped(
+        config, projection_factory, forecast_factory, ac_solar_clock):
+    """Three runs, two windows allowed. The excess hours cost standby power; dropping
+    a run would cost the yield instead, so the smallest gap is closed."""
+    #                    08   09  10   11  12   13   14   15  16   17
+    forecast = forecast_factory([200, 10, 200, 10, 200, 200, 200, 10, 10, 200],
+                                start=ac_solar_clock)
+    result = AC_SolarScheduler().run(
+        projection_factory(forecast=forecast), config)
+
+    # 08-09, 10-11 and 12-15 are one hour apart; 17-18 is two. So the first pair
+    # merges and the far one survives on its own.
+    assert _windows(result) == [(8, 15), (17, 18)]
+
+
+def test_the_number_of_windows_is_configurable(
+        config, projection_factory, forecast_factory, ac_solar_clock):
+    forecast = forecast_factory([200, 10, 200, 10, 200], start=ac_solar_clock)
+    config.agents.forecast_ac_solar.max_windows_per_day = 3
+    result = AC_SolarScheduler().run(
+        projection_factory(forecast=forecast), config)
+    assert _windows(result) == [(8, 9), (10, 11), (12, 13)]
+
+    config.agents.forecast_ac_solar.max_windows_per_day = 1
+    result = AC_SolarScheduler().run(
+        projection_factory(forecast=forecast), config)
+    assert _windows(result) == [(8, 13)]
+
+
+def test_each_day_gets_its_own_window_budget(
+        config, projection_factory, forecast_factory, ac_solar_clock):
+    """Two windows a day, not two in the plan — a four-day forecast is four days of
+    switching, and capping the plan would leave day four unplanned."""
+    day = [200, 10, 200] + [0] * 21          # 08:00, gap, 10:00, then dark
+    forecast = forecast_factory(day * 3, start=ac_solar_clock)
+    result = AC_SolarScheduler().run(
+        projection_factory(forecast=forecast), config)
+
+    assert len(result.bookings) == 6
+    assert len({b.start.date() for b in result.bookings}) == 3
+
+
+def test_hours_already_past_are_not_booked(
+        config, projection_factory, forecast_factory, ac_solar_clock):
+    """The forecast CSV carries the whole day, including this morning."""
+    forecast = forecast_factory([200] * 12, start=ac_solar_clock - timedelta(hours=4))
+    result = AC_SolarScheduler().run(
+        projection_factory(forecast=forecast), config)
+
+    assert _windows(result) == [(8, 16)]      # not (4, 16)
+
+
+# ---------------------------------------------------------------------------
 # The gateway client — unknown is not off
 # ---------------------------------------------------------------------------
 
@@ -313,7 +442,7 @@ def test_the_client_speaks_names_and_booleans(monkeypatch):
                         lambda url, json=None, headers=None, timeout=None:
                         posted.update(url=url, body=json) or _Resp())
     monkeypatch.setattr(gateway_client.requests, "get",
-                        lambda url, headers=None, timeout=None: _Resp())
+                        lambda url, params=None, headers=None, timeout=None: _Resp())
 
     client = gateway_client.GatewayClient("http://gw:5101", api_key="k")
     assert client.command("multiplus_mode", True) is True
@@ -450,6 +579,32 @@ def test_an_unreachable_actuator_waits_instead_of_driving_blind(config):
 
     assert ("multiplus_mode", True) not in gateway.commands
     assert services["multiplus_ac"].phase == "converging"
+    # And it keeps going to the device: the Gateway answers reads from memory now,
+    # and nothing else would ever refresh an entry that reads unknown — a service
+    # never writes blind, so it would wait forever on a device that had come back.
+    assert ("multiplus_mode", True) in gateway.reads
+
+
+def test_an_unreadable_actuator_nobody_wants_is_left_alone(config):
+    """The three plugs that spammed the log. Unknown, at rest, nothing to converge
+    to: the service reads the Gateway's memory once a tick and stops there."""
+    from ecowhen_power_system.control.coordinator import ModeRequest
+
+    gateway = FakeGateway(unreachable=["wallbox_relay"])
+    services, modes = actuation.build(gateway, config)
+    coordinator = Coordinator(services, modes)
+
+    for _ in range(3):
+        coordinator.tick(config)
+
+    assert services["wallbox_charger"].phase == "idle"
+    assert all(fresh is False for _, fresh in gateway.reads)
+
+    # Wanted, and it goes back to the hardware on the same tick.
+    coordinator.set_agent_requests([ModeRequest("wallbox", True, "user_agent")])
+    for _ in range(4):
+        coordinator.tick(config)
+    assert ("wallbox_relay", True) in gateway.reads
 
 
 # ---------------------------------------------------------------------------
@@ -736,6 +891,47 @@ def test_an_inhibit_suppresses_the_calendar_without_deleting_it(unit, runtime_di
     unit.coordinator.clear_inhibit()
     unit.coordinator.tick(unit.config)
     assert unit.modes["wallbox"].requesters == {"forecast_wallbox"}
+
+
+def test_manual_runs_safety_only_and_drives_nothing(unit, runtime_dirs):
+    """`control_mode: manual` pauses the graph — it does not tear it down.
+
+    An inhibit would release the requesters and let every service revert to its
+    default, which is a write. Manual must leave the hardware exactly where the
+    person at the box put it, and resume from where it was.
+    """
+    write_state(runtime_dirs)
+    agent = _interval_agent(0)
+    unit.agents = [agent]
+
+    unit.cycle()
+    assert unit.modes["wallbox"].requesters == {"forecast_wallbox"}
+    assert unit.gateway.commands, "auto drives the prerequisites"
+
+    unit.config.control_mode = "manual"
+    unit.reload_config = lambda: None      # or the YAML default would put it back
+    runs, frozen = agent.runs, unit.modes["wallbox"].state
+    unit.gateway.commands.clear()
+
+    for _ in range(4):
+        status = unit.cycle()
+    assert status["control_mode"] == "manual"
+    assert unit.gateway.commands == [], "manual never writes hardware"
+    assert agent.runs == runs, "only the safety agent runs in manual"
+    assert unit.modes["wallbox"].state == frozen, "the graph is paused, not ticking"
+    assert unit.modes["wallbox"].requesters == {"forecast_wallbox"}, \
+        "paused, not released — auto resumes where it left off"
+
+    unit.config.control_mode = "auto"
+    for _ in range(4):
+        unit.cycle()
+    assert unit.modes["wallbox"].state == "active", "and the graph converges again"
+
+
+def test_a_control_mode_that_is_neither_is_refused_at_load():
+    """Silently defaulting would read as configured and run the wrong half."""
+    with pytest.raises(ValueError, match="control_mode"):
+        ControlConfig.from_dict({"control_mode": "semi"})
 
 
 # ---------------------------------------------------------------------------

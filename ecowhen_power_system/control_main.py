@@ -30,6 +30,7 @@ from dotenv import load_dotenv
 
 from . import paths
 from .control import actuation
+from .control.agents.forecast_ac_solar import AC_SolarScheduler
 from .control.agents.forecast_wallbox import ForecastWallboxAgent
 from .control.agents.soc_wallbox_charge import SocWallboxChargeAgent
 from .control.agents.system_safety import SystemSafetyAgent
@@ -66,6 +67,7 @@ class ControlUnit:
             SocWallboxChargeAgent(),
             ForecastWallboxAgent(),
             WallboxOptimalChargeAgent(),
+            AC_SolarScheduler(),
         ]
         self.forecast_provider = SolarForecastProvider(config.forecast)
         self.log = DecisionLog(paths.DECISION_LOG_PATH, config.log_max_entries)
@@ -120,9 +122,13 @@ class ControlUnit:
 
         requests = list(self._safety_requests)
         blocks = list(self._safety_blocks)
-        planned_requests, planned_blocks = self._run_planning(projection, cfg, t_now)
-        requests += planned_requests
-        blocks += planned_blocks
+        if not cfg.manual:
+            # Manual: safety only. The planners are skipped rather than ignored —
+            # `tick` would not look at what they said anyway, and a projection per
+            # planner is the expensive half of the cycle.
+            planned_requests, planned_blocks = self._run_planning(projection, cfg, t_now)
+            requests += planned_requests
+            blocks += planned_blocks
 
         self.coordinator.set_agent_requests(requests)
         self.coordinator.set_agent_blocks(blocks)
@@ -240,7 +246,8 @@ class ControlUnit:
     def run_forever(self) -> None:
         intervals = ", ".join(f"{a.name}={a.interval(self.config)}s"
                               for a in self.agents)
-        print(f"[control] starting — cycle={self.config.safety_interval_seconds}s, "
+        print(f"[control] starting — mode={self.config.control_mode}, "
+              f"cycle={self.config.safety_interval_seconds}s, "
               f"agents: {intervals}, "
               f"gateway={self.config.gateway.base_url}")
         while True:
@@ -272,7 +279,10 @@ def _dry_run(unit: ControlUnit) -> int:
     if projection.steps:
         print(BatteryProjector(unit.config).summarise(projection))
 
-    for agent in [unit.safety] + unit.agents:
+    agents = [unit.safety] if unit.config.manual else [unit.safety] + unit.agents
+    print(f"control_mode: {unit.config.control_mode}"
+          f"{' — safety only, modes paused' if unit.config.manual else ''}")
+    for agent in agents:
         if not agent.is_enabled(unit.config):
             print(f"[{agent.name}] disabled")
             continue

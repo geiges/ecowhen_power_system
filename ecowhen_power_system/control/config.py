@@ -184,12 +184,26 @@ class WallboxOptimalChargeConfig(_AgentConfig):
 
 
 @dataclass
+class ForecastAcSolarConfig(_AgentConfig):
+    """When the balcony forecast is worth switching the Deye on for.
+
+    Both numbers are guesses and both are meant to be tuned from REST: 100 W is
+    roughly what having the inverter on costs, and two windows is a judgement about
+    how much plug cycling a day is tolerable — not a measurement of anything.
+    """
+    min_yield_w: float = 100.0
+    max_windows_per_day: int = 2
+
+
+@dataclass
 class AgentsConfig:
     system_safety: SystemSafetyConfig = field(default_factory=SystemSafetyConfig)
     soc_wallbox_charge: SocWallboxChargeConfig = field(default_factory=SocWallboxChargeConfig)
     forecast_wallbox: ForecastWallboxConfig = field(default_factory=ForecastWallboxConfig)
     wallbox_optimal_charge: WallboxOptimalChargeConfig = field(
         default_factory=WallboxOptimalChargeConfig)
+    forecast_ac_solar: ForecastAcSolarConfig = field(
+        default_factory=ForecastAcSolarConfig)
 
     @classmethod
     def from_dict(cls, d: dict) -> "AgentsConfig":
@@ -202,6 +216,14 @@ class AgentsConfig:
 
 @dataclass
 class ControlConfig:
+    # "auto"   — agents plan, modes converge, services drive hardware.
+    # "manual" — only the safety agent runs; the mode graph is *paused* rather than
+    #            torn down (no reconcile, so nothing is driven) and actuators are
+    #            switched by hand through `POST /actuators/<name>`. Switching back to
+    #            auto resumes from wherever the graph was, and the first tick
+    #            re-reads every requester — so a plug somebody moved by hand in the
+    #            meantime is driven back to what the modes want.
+    control_mode: str = "auto"
     # The tick. Everything else here is a wall clock, so this only sets how quickly
     # the mode graph converges: bringing the wallbox up costs four ticks — declare,
     # prerequisites satisfied, primary required, plug confirmed — which was four
@@ -232,6 +254,16 @@ class ControlConfig:
     gateway: GatewayConfig = field(default_factory=GatewayConfig)
     services: ServicesConfig = field(default_factory=ServicesConfig)
     agents: AgentsConfig = field(default_factory=AgentsConfig)
+
+    def __post_init__(self):
+        if self.control_mode not in ("auto", "manual"):
+            raise ValueError(
+                f"control_mode must be 'auto' or 'manual', not {self.control_mode!r}"
+            )
+
+    @property
+    def manual(self) -> bool:
+        return self.control_mode == "manual"
 
     @classmethod
     def from_dict(cls, d: dict) -> "ControlConfig":

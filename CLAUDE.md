@@ -142,6 +142,34 @@ Only `multiplus_ac` and `mppt100_dc_load` carry a `services.*_default_on` knob. 
 plugs do not: a socket nobody asked for is off, and a setting saying otherwise is a setting
 that switches the wallbox on by accident.
 
+### Auto and manual
+
+`control_mode` (top level in `control_config.yaml`, `"auto"` | `"manual"`, default `auto`)
+is the one switch over the whole brain. **`manual` pauses the mode graph; it does not tear
+it down.** Only the safety agent runs — its direct commands and its inhibit still apply,
+because those are the things that must not be switchable off — every planning agent is
+skipped, and `Coordinator.tick` returns the status without reconciling anything. Nothing is
+driven, so actuators are whatever the person at the box last POSTed to `/actuators/<name>`.
+
+It is deliberately **not** an inhibit. An inhibit releases every requester, which lets each
+service revert to its `default_on` — and that revert *is* a write, generally to off. Someone
+switching to manual asked for control to stop touching the hardware, not for it to switch
+the hardware off on the way out. So the requesters, the mode states and the plans are all
+left standing: back in `auto`, the graph resumes from where it was, and the first tick
+re-reads every actuator, so a plug moved by hand meanwhile is driven back to what the modes
+want. Anything not wanted at that point stands down through the ordinary path.
+
+`control_mode` is in `GET /control/modes` (and `modes_status.json`) as its own key, because
+a frozen graph reads as a bug without it. A value that is neither is refused at load with a
+400 naming it — `ControlConfig.__post_init__` validates, so `PUT /control/config` and
+`PUT /control/control_mode` are both covered by the one check.
+
+`GET`/`PUT /control/control_mode` is the dashboard's switch: one key, so a button cannot
+carry the rest of the config with it, and everything else in the file is preserved.
+Named for the config key rather than `/control/mode`, which sits one character from
+`/control/modes/<name>` and means something else entirely. Control picks the change up on
+its next tick — `reload_config` runs every cycle.
+
 ### Saying no
 
 A mode is wanted by requesters and forbidden by **blockers**, and one blocker outvotes every
@@ -303,6 +331,19 @@ lengthening one past ~8 minutes means raising this too.
   rather than a shrug. Collapsing null to `false` instead flaps the actuator every tick.
 - **A POST never reads back.** It reports what it wrote. Convergence takes two ticks on
   purpose; confirming in the same breath would trust a value the device may not have applied.
+- **A GET answers from what the Gateway last read**, and it caches the *reading*, never the
+  value a POST wrote — that distinction is what still catches a write the device ignored.
+  Nothing expires on its own (`CACHE_MAX_AGE = None` in `gateway/actuators.py`): a periodic
+  re-read costs three seconds of blocking per unreachable Tasmota, times two URLs, on a ten
+  second tick, which is exactly what the cache is for. **Two things go back to the hardware** —
+  a POST to that actuator (it drops the entry, which is why convergence still verifies), and
+  `?max_age=<seconds>`. A **failure is remembered like any other answer**, or an unreachable
+  plug is retried every tick and nothing is saved. Control asks `max_age=0` in one place:
+  `ActuatorService.read_actual_on`, when a read came back *unknown* and something requires the
+  service — nothing else would ever refresh that entry, since a service never drives blind.
+  The cost is that a device changed behind the Gateway's back (the plug's physical button, a
+  power cut) stays wrong until something writes it. A cached body carries `cached: true` and
+  `age_seconds`.
 - **`hardware = None` means "real component, nothing on the bus reports it"** (the battery,
   for one). Anything iterating `psystem.values()` and touching the bus must skip those.
 - **Victron reports "invalid" as an empty array**, not an error and not `None`. Reads that
@@ -335,9 +376,12 @@ lengthening one past ~8 minutes means raising this too.
 
 ```
 GET  /actuators/                     list
-GET  /actuators/<name>               {"value": .., "on": true|false|null}
+GET  /actuators/<name>               {"value": .., "on": true|false|null}; from memory
+                                     unless ?max_age=<s> — see "Things that will bite you"
 POST /actuators/<name>               {"on": bool}
 GET  /control/modes | /services | /schedule | /modes/requests | /config | /log | /agents
+GET  /control/control_mode           {"control_mode": "auto"|"manual"}
+PUT  /control/control_mode           the same, one key — the dashboard's switch
 POST /control/modes/<name>/activate  {} = standing want; {"from","until"} = a booking
 POST /control/modes/<name>/deactivate  drops the standing want AND every booking for it
 POST /control/modes/<name>/reset     clears `failed`; the standing want is left alone
@@ -372,7 +416,7 @@ would break the single-producer rule on that file.
 ## Working here
 
 ```bash
-uv run python -m pytest tests/     # 189 tests, green. Keep it that way.
+uv run python -m pytest tests/     # 216 tests, green. Keep it that way.
 uv run ecops-power-system --once   # single poll; --no-startup-sequence to never write the bus
 uv run ecops-control --dry-run     # run every agent, command nothing
 uv run ecops-logger --once

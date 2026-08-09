@@ -254,6 +254,67 @@ def test_an_unreadable_device_is_an_error_not_a_guess(client, bus_values):
 
 
 # ---------------------------------------------------------------------------
+# A read is remembered: this process is the only writer
+# ---------------------------------------------------------------------------
+
+def test_a_second_read_comes_from_memory_not_the_hardware(client, bus_values):
+    """The whole point: a settled system touches no hardware. Control asks five
+    actuators every ten seconds, and three of them are HTTP plugs with a three
+    second timeout each, twice over for the fallback URL."""
+    first = client.get("/actuators/multiplus_mode", headers=AUTH).get_json()
+    assert first["on"] is True and "cached" not in first
+
+    bus_values[MULTIPLUS]["/Mode"] = 4       # the bus moved; nobody asked the bus
+
+    second = client.get("/actuators/multiplus_mode", headers=AUTH).get_json()
+    assert second["on"] is True and second["cached"] is True
+    assert client.get("/actuators/multiplus_mode?max_age=0",
+                      headers=AUTH).get_json()["on"] is False
+
+
+def test_a_write_drops_what_was_remembered(client, bus_values):
+    """Convergence still verifies: the read after a write goes to the device, which
+    is what catches a write the hardware silently ignored."""
+    client.get("/actuators/multiplus_mode", headers=AUTH)
+    client.post("/actuators/multiplus_mode", json={"on": False}, headers=AUTH)
+
+    body = client.get("/actuators/multiplus_mode", headers=AUTH).get_json()
+    assert body["on"] is False and "cached" not in body
+
+
+def test_an_unreachable_plug_is_only_asked_once(client, monkeypatch):
+    """A failure is remembered like any other answer. Retrying it every tick at three
+    seconds a URL is the cost this cache exists to remove."""
+    import requests as _requests
+    calls = []
+
+    def fake_get(url, params=None, timeout=None):
+        calls.append(url)
+        raise _requests.exceptions.ConnectionError("down")
+
+    monkeypatch.setattr(transports.requests, "get", fake_get)
+
+    for _ in range(4):
+        resp = client.get("/actuators/wallbox_relay", headers=AUTH)
+        assert resp.status_code == 502
+
+    assert len(calls) == 2, "one attempt per declared URL, once — not per request"
+    client.get("/actuators/wallbox_relay?max_age=0", headers=AUTH)
+    assert len(calls) == 4, "and max_age=0 is the way back to the hardware"
+
+
+def test_a_new_topology_forgets_the_old_readings(client, bus_values,
+                                                  system_config_file):
+    """New addresses, new hardware: what we remembered was about something else."""
+    client.get("/actuators/multiplus_mode", headers=AUTH)
+    bus_values[MULTIPLUS]["/Mode"] = 4
+    system_config_file.touch()
+
+    body = client.get("/actuators/multiplus_mode", headers=AUTH).get_json()
+    assert body["on"] is False and "cached" not in body
+
+
+# ---------------------------------------------------------------------------
 # A9: the fan writes VE.Direct and reads D-Bus, in different value spaces
 # ---------------------------------------------------------------------------
 
@@ -549,7 +610,8 @@ def test_the_agent_list_comes_from_the_config_not_a_literal(client, runtime_dirs
     by_name = {a["name"]: a for a in agents}
 
     assert set(by_name) == {"system_safety", "soc_wallbox_charge",
-                            "forecast_wallbox", "wallbox_optimal_charge"}
+                            "forecast_wallbox", "wallbox_optimal_charge",
+                            "forecast_ac_solar"}
     assert by_name["system_safety"]["last_result"]["rationale"] == "OK"
     assert by_name["soc_wallbox_charge"]["last_result"] is None
     assert by_name["system_safety"]["enabled"] is True
@@ -622,6 +684,30 @@ def test_a_warn_threshold_past_its_limit_is_refused(client, runtime_dirs):
     assert "max voltage" in resp.get_json()["error"]
     assert client.get("/control/config",
                       headers=AUTH).get_json()["battery"]["warn_max_voltage"] == 28.4
+
+
+def test_the_control_mode_switch(client, runtime_dirs):
+    """The dashboard's auto/manual button: one key, and it must not take the rest
+    of the config with it."""
+    assert client.get("/control/control_mode",
+                      headers=AUTH).get_json()["control_mode"] == "auto"
+
+    client.put("/control/config", headers=AUTH, json={"estimated_load_w": 35.0})
+    resp = client.put("/control/control_mode", headers=AUTH,
+                      json={"control_mode": "manual"})
+
+    assert resp.status_code == 200
+    assert resp.get_json()["control_mode"] == "manual"
+    config = client.get("/control/config", headers=AUTH).get_json()
+    assert config["control_mode"] == "manual"
+    assert config["estimated_load_w"] == 35.0, "the rest of the file is untouched"
+
+    bad = client.put("/control/control_mode", headers=AUTH,
+                     json={"control_mode": "semi"})
+    assert bad.status_code == 400
+    assert "control_mode" in bad.get_json()["error"]
+    assert client.get("/control/control_mode",
+                      headers=AUTH).get_json()["control_mode"] == "manual"
 
 
 def test_read_only_refuses_mode_and_config_changes(fake_bus, system_config_file,
