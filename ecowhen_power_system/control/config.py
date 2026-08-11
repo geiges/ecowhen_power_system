@@ -38,6 +38,17 @@ def now() -> datetime:
     return datetime.now(tz=TZ)
 
 
+def knob(default, unit: str = "", help: str = ""):
+    """A tunable field, with the two things a form needs and `asdict` drops.
+
+    Only the agent knobs carry it, because they are the ones `GET /control/agents`
+    publishes for the dashboard's settings panel. A field without it still works —
+    the schema simply reports no unit and no help, which is what a key nobody
+    intends to be edited from a browser should look like.
+    """
+    return field(default=default, metadata={"unit": unit, "help": help})
+
+
 class _FromDict:
     """Build from a dict, ignoring keys the dataclass does not declare."""
 
@@ -143,7 +154,8 @@ class _AgentConfig(_FromDict):
     `_FromDict` exists to avoid. Set it here only to overrule the agent.
     """
     enabled: bool = False
-    interval_seconds: int = None      # None → the agent's own declaration
+    interval_seconds: int = knob(
+        None, "s", "How often this agent plans. Empty means the agent's own cadence.")
 
 
 @dataclass
@@ -160,27 +172,40 @@ class SystemSafetyConfig(_FromDict):
 
 @dataclass
 class SocWallboxChargeConfig(_AgentConfig):
-    soc_on_threshold: float = 0.99    # SOC considered "full"
-    soc_on_minutes: int = 30          # minutes at full before requesting the wallbox
-    soc_off_threshold: float = 0.25   # SOC below which the wallbox is released
+    soc_on_threshold: float = knob(
+        0.99, "0–1", "SOC counted as full.")
+    soc_on_minutes: int = knob(
+        30, "min", "How long the battery must stay full before the wallbox is asked for.")
+    soc_off_threshold: float = knob(
+        0.25, "0–1", "SOC at which the wallbox is released again.")
 
 
 @dataclass
 class ForecastWallboxConfig(_AgentConfig):
-    wallbox_power_w: float = 1600.0
-    max_periods_per_day: int = 2
-    inverter_efficiency: float = 0.93
-    min_period_minutes: int = 30
-    merge_gap_minutes: int = 30
-    min_solar_fraction: float = 0.5
+    wallbox_power_w: float = knob(
+        1600.0, "W", "What the wallbox draws while charging.")
+    max_periods_per_day: int = knob(
+        2, "", "Most charging windows to plan in one day.")
+    inverter_efficiency: float = knob(
+        0.93, "0–1", "DC→AC efficiency assumed when costing a window.")
+    min_period_minutes: int = knob(
+        30, "min", "Windows shorter than this are not worth switching for.")
+    merge_gap_minutes: int = knob(
+        30, "min", "Two windows closer than this become one.")
+    min_solar_fraction: float = knob(
+        0.5, "0–1", "Least share of the charge that must come from solar.")
 
 
 @dataclass
 class WallboxOptimalChargeConfig(_AgentConfig):
-    wallbox_power_w: float = 1600.0
-    inverter_efficiency: float = 0.93
-    horizon_days: int = 4
-    min_storage_fraction: float = 0.25
+    wallbox_power_w: float = knob(
+        1600.0, "W", "What the wallbox draws while charging.")
+    inverter_efficiency: float = knob(
+        0.93, "0–1", "DC→AC efficiency assumed when costing a window.")
+    horizon_days: int = knob(
+        4, "d", "How far ahead the forecast is optimised over.")
+    min_storage_fraction: float = knob(
+        0.25, "0–1", "Share of the battery kept back for the house.")
 
 
 @dataclass
@@ -191,8 +216,10 @@ class ForecastAcSolarConfig(_AgentConfig):
     roughly what having the inverter on costs, and two windows is a judgement about
     how much plug cycling a day is tolerable — not a measurement of anything.
     """
-    min_yield_w: float = 100.0
-    max_windows_per_day: int = 2
+    min_yield_w: float = knob(
+        100.0, "W", "Forecast balcony yield below which the Deye is not worth running.")
+    max_windows_per_day: int = knob(
+        2, "", "Most times a day the balcony inverter is switched on.")
 
 
 @dataclass

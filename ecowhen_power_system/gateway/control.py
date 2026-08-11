@@ -356,12 +356,38 @@ def put_config():
     return jsonify(dataclasses.asdict(updated))
 
 
+def _agent_schema(agent_conf) -> list:
+    """What a form needs and `asdict` throws away: type, default, unit, help.
+
+    Read off the dataclass rather than written down again, so a knob added there
+    shows up in the dashboard's settings panel without a second edit — the same
+    reason the agent list itself is `ControlConfig.agents`' fields. `default` is
+    the dataclass's, not the file's: it is what "reset this field" means, and the
+    file's value is already in `config`.
+    """
+    return [
+        {
+            "name": f.name,
+            # The *declared* type, because a null value carries none —
+            # `interval_seconds` is exactly that case and a form cannot guess it.
+            "type": getattr(f.type, "__name__", str(f.type)),
+            "default": None if f.default is dataclasses.MISSING else f.default,
+            "unit": f.metadata.get("unit", ""),
+            "help": f.metadata.get("help", ""),
+        }
+        for f in dataclasses.fields(agent_conf)
+    ]
+
+
 @control_bp.get("/agents")
 def get_agents():
-    """Every agent, its enabled flag, and the last thing it said.
+    """Every agent, its enabled flag, the last thing it said, and its knobs.
 
     The agent list is `ControlConfig.agents`' own fields rather than a literal, so
-    an agent added there appears here without a second edit.
+    an agent added there appears here without a second edit. `config` is that
+    agent's slice of the config file and `schema` describes each of its fields —
+    together they are everything the dashboard's gear panel renders, and the edit
+    goes back through `PUT /control/config`, which validates.
     """
     cfg = ControlConfig.load_or_default(paths.CONTROL_CONFIG_PATH)
     agents = dataclasses.asdict(cfg.agents)
@@ -376,7 +402,9 @@ def get_agents():
 
     return jsonify([
         {"name": name, "enabled": conf.get("enabled", True),
-         "last_result": last.get(name)}
+         "last_result": last.get(name),
+         "config": conf,
+         "schema": _agent_schema(getattr(cfg.agents, name))}
         for name, conf in agents.items()
     ])
 

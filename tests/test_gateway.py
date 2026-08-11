@@ -617,6 +617,26 @@ def test_the_agent_list_comes_from_the_config_not_a_literal(client, runtime_dirs
     assert by_name["system_safety"]["enabled"] is True
 
 
+def test_each_agent_publishes_its_knobs_with_units_and_defaults(client):
+    """The dashboard's gear panel renders from this, so it needs the three things
+    `asdict` drops: the declared type (a null value carries none), the dataclass
+    default (what "reset this field" means) and the unit."""
+    by_name = {a["name"]: a for a in
+               client.get("/control/agents", headers=AUTH).get_json()}
+
+    schema = {f["name"]: f for f in by_name["forecast_ac_solar"]["schema"]}
+    assert schema["min_yield_w"]["unit"] == "W"
+    assert schema["min_yield_w"]["default"] == 100.0
+    assert schema["min_yield_w"]["help"]
+    # The one field whose value is null: its type can only come from the dataclass.
+    assert by_name["forecast_ac_solar"]["config"]["interval_seconds"] is None
+    assert schema["interval_seconds"]["type"] == "int"
+
+    # A field carrying no knob() metadata still appears, just bare.
+    safety = {f["name"]: f for f in by_name["system_safety"]["schema"]}
+    assert safety["confirmed_disable"]["unit"] == ""
+
+
 def test_the_schedule_is_served_and_says_who_is_missing(client, runtime_dirs):
     """The calendar a UI renders. Same 503-not-404 rule as every other status file."""
     resp = client.get("/control/schedule", headers=AUTH)

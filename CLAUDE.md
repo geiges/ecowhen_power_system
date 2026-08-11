@@ -390,11 +390,20 @@ PUT  /control/config                 deep-merge into control_config.yaml
 GET  /files/runtime/… | /files/data/…
 ```
 
-`/control/agents` is each agent with its `enabled` flag and the last thing it said, and the
-agent list comes from `ControlConfig.agents`' own fields — adding an agent there is the only
-edit needed. It finds "the last thing it said" by scanning `control_log.jsonl` backwards, so
-**`log_max_entries` has to cover the slowest agent's interval** or a planner reads as
-`last_result: null` — see below.
+`/control/agents` is each agent with its `enabled` flag, the last thing it said, its `config`
+(that agent's slice of the file) and its `schema`, and the agent list comes from
+`ControlConfig.agents`' own fields — adding an agent there is the only edit needed. It finds
+"the last thing it said" by scanning `control_log.jsonl` backwards, so **`log_max_entries` has
+to cover the slowest agent's interval** or a planner reads as `last_result: null` — see below.
+
+`schema` is what a settings form needs and `asdict` drops: per field its declared **type**,
+dataclass **default**, **unit** and **help**. It is read off `dataclasses.fields`, so a knob
+added to an agent config appears in the dashboard's gear panel with no second edit. Units and
+help come from `knob(default, unit, help)` in `control/config.py` — a thin `field(metadata=…)`
+wrapper; a field declared plainly still appears, just bare. The type is published because the
+*value* has none when it is null, which `interval_seconds` always is until somebody overrules
+the agent. Edits go back through `PUT /control/config`, which validates the whole tree — there
+is no per-agent write endpoint and no second validator.
 
 **Two file endpoints, and the split matters to consumers:** `runtime` serves the contracts
 (`state.json`, `system_configuration.yaml`, the status files), `data` serves the durable time
