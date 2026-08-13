@@ -374,6 +374,11 @@ def _agent_schema(agent_conf) -> list:
             "default": None if f.default is dataclasses.MISSING else f.default,
             "unit": f.metadata.get("unit", ""),
             "help": f.metadata.get("help", ""),
+            # A field with no knob() defaults to *not* editable: everything
+            # currently in that position is either a flag with its own control
+            # (`enabled`, `confirmed_disable`) or a key nobody meant to publish.
+            # Opting in is one word; a form offering the wrong knob is not.
+            "editable": bool(f.metadata.get("editable", False)),
         }
         for f in dataclasses.fields(agent_conf)
     ]

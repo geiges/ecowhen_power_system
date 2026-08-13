@@ -202,6 +202,19 @@ def test_a_state_without_derived_values_is_refused(runtime_dirs):
         read_current_state()
 
 
+def test_the_standalone_probes_are_read_by_short_name(runtime_dirs):
+    """`<component>/temperature` and nothing else: the battery's own reading has its
+    own field, and `multiplus/alarm_temperature` is an alarm flag, not a °C."""
+    write_state(runtime_dirs, **{
+        "DS18B20_shunt/temperature": 31.5,
+        "DS18B20_inside/temperature": 28.0,
+        "multiplus/alarm_temperature": 0,
+    })
+    assert read_current_state().sensor_temps == {
+        "DS18B20_shunt": 31.5, "DS18B20_inside": 28.0,
+    }
+
+
 def test_minutes_at_full_soc_comes_from_the_contract_not_the_logger(runtime_dirs):
     """Decision #7: the Logger is a pure sink. Nothing may glob `sim_*.csv`."""
     write_state(runtime_dirs, minutes_at_full_soc=42.0)
@@ -274,6 +287,29 @@ def test_the_deadband_is_read_from_the_config_not_baked_in(config,
     config.battery.warn_max_voltage = 29.0
     assert SystemSafetyAgent().run(
         projection_factory(battery_voltage=28.5), config).blocks == []
+
+
+def test_a_hot_probe_acts_exactly_like_the_battery_sensor(config, projection_factory):
+    """The three DS18B20s carry the battery's own limits and the battery's own
+    actions — one compartment, one rating. A cold one cuts the drains; a hot one
+    cuts mains to the Deye and holds `ac_solar` off across the deadband."""
+    agent = SystemSafetyAgent()
+
+    hot = agent.run(projection_factory(sensor_temps={"DS18B20_shunt": 47.0}), config)
+    assert [(c.actuator, c.on) for c in hot.commands] == [("ac_inverter_relay", False)]
+    assert [b.mode for b in hot.blocks] == ["ac_solar"]
+    assert "DS18B20_shunt temperature" in hot.inhibit
+
+    easing = agent.run(projection_factory(sensor_temps={"DS18B20_shunt": 42.0}), config)
+    assert easing.commands == [] and [b.mode for b in easing.blocks] == ["ac_solar"]
+
+    cold = agent.run(projection_factory(sensor_temps={"DS18B20_inside": 2.0}), config)
+    assert dict((c.actuator, c.on) for c in cold.commands) == {
+        "multiplus_mode": False, "mppt100_load": False,
+    }
+
+    # A probe that stopped reporting is not a breach at 0 °C.
+    assert agent.run(projection_factory(), config).commands == []
 
 
 def test_a_quiet_system_neither_commands_nor_inhibits(config, projection_factory):
@@ -493,7 +529,7 @@ def want(system, *modes):
     ])
 
 
-def test_the_wallbox_waits_for_the_inverter_and_the_fan(system):
+def test_the_wallbox_waits_for_the_inverter(system):
     """The plan's live round trip, off-device: activate → services converge → plug on.
 
     The ordering is never stated here. It falls out of `required_services`, which is
@@ -507,7 +543,6 @@ def test_the_wallbox_waits_for_the_inverter_and_the_fan(system):
 
     assert tick_until(system, lambda: system.modes["wallbox"].state == "active")
     assert system.gateway.actual["multiplus_mode"] is True
-    assert system.gateway.actual["mppt100_load"] is True
     assert system.gateway.actual["wallbox_relay"] is True
 
     order = [a for a, on in system.gateway.commands if on]
@@ -1028,7 +1063,7 @@ def wired(fake_bus, bus_values, runtime_dirs, monkeypatch):
 
 def test_activating_the_wallbox_reaches_the_hardware(wired, runtime_dirs):
     """POST /control/modes/wallbox/activate → services converge → the plug goes on."""
-    from conftest import MPPT100, MULTIPLUS
+    from conftest import MULTIPLUS
 
     write_state(runtime_dirs, SOC_counted=0.5)      # the SOC agent stays out of it
     wired.bus[MULTIPLUS]["/Mode"] = 4               # inverter off to begin with
@@ -1041,13 +1076,10 @@ def test_activating_the_wallbox_reaches_the_hardware(wired, runtime_dirs):
 
     assert status["modes"]["wallbox"]["state"] == "active"
     assert wired.bus[MULTIPLUS]["/Mode"] == 3, "derived from the component's mapping"
-    assert wired.bus[MPPT100]["/Load/State"] == 1, "the bus's on, not the register's 4"
-    assert wired.bus[MPPT100]["/Load/I"] >= 0.1, "and the fan is actually turning"
     assert any(on for on in wired.plugs.values())
 
     services = json.loads(runtime_dirs.SERVICES_STATUS_PATH.read_text())["services"]
     assert services["multiplus_ac"]["phase"] == "satisfied"
-    assert services["mppt100_dc_load"]["phase"] == "satisfied"
 
 
 def test_the_ac_plug_modes_bring_mains_up_first_and_leave_the_fan_alone(wired,

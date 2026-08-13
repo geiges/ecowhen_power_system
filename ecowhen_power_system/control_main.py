@@ -28,7 +28,7 @@ import time
 
 from dotenv import load_dotenv
 
-from . import paths
+from . import health, paths
 from .control import actuation
 from .control.agents.forecast_ac_solar import AC_SolarScheduler
 from .control.agents.forecast_wallbox import ForecastWallboxAgent
@@ -252,10 +252,16 @@ class ControlUnit:
               f"gateway={self.config.gateway.base_url}")
         while True:
             t_start = now()
+            detail = ""
             try:
                 self.cycle()
             except Exception as exc:
-                print(f"[control] cycle failed: {exc}")
+                detail = f"cycle failed: {exc}"
+                print(f"[control] {detail}")
+            # After the cycle, failure included: a loop that is turning but raising
+            # is a different fault from one that has stopped, and the UI shows both.
+            health.beat("control", self.config.safety_interval_seconds, now(),
+                        ok=not detail, detail=detail)
             elapsed = (now() - t_start).total_seconds()
             time.sleep(max(0.0, self.config.safety_interval_seconds - elapsed))
 

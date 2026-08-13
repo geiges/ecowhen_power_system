@@ -84,6 +84,38 @@ def test_health_needs_no_key(client):
     assert client.get("/health").status_code == 200
 
 
+def test_health_reports_every_process_and_never_5xxes(client, runtime_dirs):
+    """The UI's one dot per process. A process that never started is `down`, one
+    whose loop stopped turning is `stale`, one still turning but raising is
+    `error` — three different things a single "is it up" boolean cannot say."""
+    from ecowhen_power_system import health
+    t_now = datetime.now().astimezone()
+
+    health.beat("power_system", 5, t_now)
+    health.beat("control", 10, t_now, ok=False, detail="cycle failed: boom")
+    health.beat("logger", 5, t_now - timedelta(minutes=5))
+    # ...and nothing at all for the Gateway, which answers for itself.
+
+    body = client.get("/health").get_json()
+    assert client.get("/health").status_code == 200, "degraded is a body, not a 5xx"
+    assert body["status"] == "degraded"
+    assert {name: p["status"] for name, p in body["processes"].items()} == {
+        "power_system": "ok", "control": "error", "logger": "stale", "gateway": "ok",
+    }
+    assert body["processes"]["control"]["detail"] == "cycle failed: boom"
+
+    health.beat("control", 10, t_now)
+    health.beat("logger", 5, t_now)
+    assert client.get("/health").get_json()["status"] == "ok"
+
+
+def test_a_process_that_has_not_run_reads_as_down_not_ok(client, runtime_dirs):
+    """The failure mode this exists to catch: no file must never read as healthy."""
+    body = client.get("/health").get_json()
+    assert body["status"] == "degraded"
+    assert body["processes"]["control"]["status"] == "down"
+
+
 def test_every_other_route_needs_the_key(client):
     assert client.get("/actuators/").status_code == 401
     assert client.post("/actuators/multiplus_mode", json={"on": True}).status_code == 401
@@ -626,15 +658,20 @@ def test_each_agent_publishes_its_knobs_with_units_and_defaults(client):
 
     schema = {f["name"]: f for f in by_name["forecast_ac_solar"]["schema"]}
     assert schema["min_yield_w"]["unit"] == "W"
-    assert schema["min_yield_w"]["default"] == 100.0
+    # The default is published, not what it happens to be — tuning that number is
+    # the whole point of the knob, and a test pinning it would fail on a tuning.
+    assert "default" in schema["min_yield_w"]
     assert schema["min_yield_w"]["help"]
     # The one field whose value is null: its type can only come from the dataclass.
     assert by_name["forecast_ac_solar"]["config"]["interval_seconds"] is None
     assert schema["interval_seconds"]["type"] == "int"
 
-    # A field carrying no knob() metadata still appears, just bare.
+    # A field carrying no knob() metadata still appears, just bare, and does not
+    # become editable by omission — the fallback, not anybody's choice of knob.
+    # Which knobs are editable is a decision, so no test pins it.
     safety = {f["name"]: f for f in by_name["system_safety"]["schema"]}
     assert safety["confirmed_disable"]["unit"] == ""
+    assert safety["confirmed_disable"]["editable"] is False
 
 
 def test_the_schedule_is_served_and_says_who_is_missing(client, runtime_dirs):

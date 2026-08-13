@@ -15,7 +15,7 @@ Three things changed against the predecessor's `control/state.py`:
   a reason to keep acting on its last opinion.
 """
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 
 from .. import paths
@@ -39,6 +39,12 @@ class CurrentState:
     mppt_150_power_w: float       # W
     mppt_100_power_w: float       # W
     minutes_at_full_soc: float    # published by the Power System's SocTracker
+    # The standalone probes, {short_name: °C} — everything publishing a plain
+    # `<component>/temperature`. Collected by key rather than named one by one, so
+    # a sensor added to `config_default.system_components` is supervised without a
+    # second edit. A probe that stops reporting drops out of the dict and out of
+    # the safety metrics with it: absent is not 0 °C.
+    sensor_temps: dict = field(default_factory=dict)
 
 
 def _float(state: dict, key: str, default=None):
@@ -92,6 +98,13 @@ def read_current_state(path=None, max_age_seconds: float = 120.0,
             "derived, not measured (A12) — the estimator did not run this poll."
         )
 
+    sensor_temps = {}
+    for key in state:
+        if key.endswith("/temperature"):
+            value = _float(state, key)
+            if value is not None:
+                sensor_temps[key.split("/")[0]] = value
+
     return CurrentState(
         timestamp=timestamp,
         age_seconds=age,
@@ -104,4 +117,5 @@ def read_current_state(path=None, max_age_seconds: float = 120.0,
         mppt_150_power_w=_float(state, "mppt150/power_yield", 0.0),
         mppt_100_power_w=_float(state, "mppt100/power_yield", 0.0),
         minutes_at_full_soc=_float(state, "minutes_at_full_soc", 0.0),
+        sensor_temps=sensor_temps,
     )

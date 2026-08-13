@@ -19,7 +19,7 @@ the hardware it switches, a *mode* for what the user wants (A8):
 
     mode        primary service    prerequisites
     --------    ---------------    -----------------------------
-    wallbox     wallbox_charger    multiplus_ac, mppt100_dc_load
+    wallbox     wallbox_charger    multiplus_ac
     ac_solar    deye_inverter      multiplus_ac
     ac_other    other_ac_supply    multiplus_ac  (blocked_by wallbox)
     cooling     —                  mppt100_dc_load
@@ -143,8 +143,12 @@ def build(gateway, config):
             # Exactly the predecessor's wallbox_on step list — inverter, then fan,
             # then plug — except that here it is a declaration, and the teardown
             # falls out of it instead of being written backwards in a second file.
+            # ponytail: mppt100_dc_load dropped from the prerequisites while the
+            # MPPT's load output is broken — cooling is wired to the AC inverter
+            # now, so it comes up with multiplus_ac. Put it back when the load
+            # switch works again.
             ServiceMode("wallbox", services, primary="wallbox_charger",
-                        required_services=["multiplus_ac", "mppt100_dc_load"]),
+                        required_services=["multiplus_ac"]),
             # Both plugs hang off the Multiplus's AC output, so mains has to be there
             # before switching one on is worth anything.
             ServiceMode("ac_solar", services, primary="deye_inverter",

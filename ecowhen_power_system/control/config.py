@@ -38,15 +38,24 @@ def now() -> datetime:
     return datetime.now(tz=TZ)
 
 
-def knob(default, unit: str = "", help: str = ""):
-    """A tunable field, with the two things a form needs and `asdict` drops.
+def knob(default, unit: str = "", help: str = "", editable: bool = True):
+    """A tunable field, with the things a form needs and `asdict` drops.
 
     Only the agent knobs carry it, because they are the ones `GET /control/agents`
     publishes for the dashboard's settings panel. A field without it still works —
     the schema simply reports no unit and no help, which is what a key nobody
     intends to be edited from a browser should look like.
+
+    `editable=False` marks a knob that describes the installation rather than a
+    judgement about how to run it: what the wallbox draws, what the inverter loses.
+    Tuning those from a phone does not change the hardware, it only makes the
+    planner wrong about it. They are still shown — reading them is how you check
+    the planner's assumptions — and still settable through `PUT /control/config`,
+    which is the right amount of friction for a number you change when the hardware
+    changes.
     """
-    return field(default=default, metadata={"unit": unit, "help": help})
+    return field(default=default,
+                 metadata={"unit": unit, "help": help, "editable": editable})
 
 
 class _FromDict:
@@ -155,7 +164,8 @@ class _AgentConfig(_FromDict):
     """
     enabled: bool = False
     interval_seconds: int = knob(
-        None, "s", "How often this agent plans. Empty means the agent's own cadence.")
+        None, "s", "How often this agent plans. Empty means the agent's own cadence.",
+        editable=False)
 
 
 @dataclass
@@ -187,7 +197,7 @@ class ForecastWallboxConfig(_AgentConfig):
     max_periods_per_day: int = knob(
         2, "", "Most charging windows to plan in one day.")
     inverter_efficiency: float = knob(
-        0.93, "0–1", "DC→AC efficiency assumed when costing a window.")
+        0.93, "0–1", "DC→AC efficiency assumed when costing a window.", editable=False)
     min_period_minutes: int = knob(
         30, "min", "Windows shorter than this are not worth switching for.")
     merge_gap_minutes: int = knob(
@@ -201,7 +211,7 @@ class WallboxOptimalChargeConfig(_AgentConfig):
     wallbox_power_w: float = knob(
         1600.0, "W", "What the wallbox draws while charging.")
     inverter_efficiency: float = knob(
-        0.93, "0–1", "DC→AC efficiency assumed when costing a window.")
+        0.93, "0–1", "DC→AC efficiency assumed when costing a window.", editable=False)
     horizon_days: int = knob(
         4, "d", "How far ahead the forecast is optimised over.")
     min_storage_fraction: float = knob(

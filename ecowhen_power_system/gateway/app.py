@@ -10,7 +10,7 @@ import os
 
 from flask import Flask, jsonify, request
 
-from .. import discovery, paths
+from .. import discovery, health, paths
 from .actuators import actuators_bp
 from .control import control_bp
 from .files import default_endpoints, files_bp
@@ -91,9 +91,25 @@ def create_app(bus=None, system_config_path=None, read_only=False) -> Flask:
     app.before_request(check_api_key)
 
     @app.get("/health")
-    def health():
-        """Unauthenticated liveness check."""
-        return jsonify({"status": "ok"})
+    def health_route():
+        """Every process's health, unauthenticated — the UI's one dot per process.
+
+        Unauthenticated because it is what a dashboard falls back to when nothing
+        else answers, and because it carries no measurements and nothing writable.
+
+        Always 200, never a 5xx: `status: degraded` in the body is the answer, and
+        a UI polling this wants to render the three green dots alongside the red
+        one. The Gateway has no heartbeat file of its own — answering this request
+        is its heartbeat, and a client that gets no answer has learnt the same
+        thing. `read_only` is here because it changes what actuation does, which
+        looks like a fault from the outside if you cannot see it.
+        """
+        payload = health.snapshot()
+        payload["processes"]["gateway"] = {
+            "status": "ok", "age_seconds": 0.0, "interval_seconds": None,
+            "detail": "read-only" if app.config["READ_ONLY"] else "",
+        }
+        return jsonify(payload)
 
     app.register_blueprint(actuators_bp, url_prefix="/actuators")
     app.register_blueprint(files_bp, url_prefix="/files")

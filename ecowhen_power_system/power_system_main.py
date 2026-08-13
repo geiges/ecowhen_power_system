@@ -18,7 +18,7 @@ from datetime import datetime, timedelta
 import pytz
 
 from . import config_default as config
-from . import discovery, paths, poll
+from . import discovery, health, paths, poll
 from .manufacturer.victron import get_bus
 
 # Past this age a persisted SOC estimate is discarded and SOC is re-derived from
@@ -78,6 +78,13 @@ def run_loop(bus, system_config, psystem, simulator, soc_tracker, tz, debug=Fals
                     t_now=t_now,
                     soc_above_threshold_since=soc_tracker.since,
                 )
+
+        # A poll that produced no state is `error`, not silence: the process is
+        # alive and state.json is simply not being refreshed, which is the failure
+        # every other process is about to trip over.
+        health.beat("power_system", config.log_interval, datetime.now(tz=tz),
+                    ok=state is not None,
+                    detail="" if state is not None else "poll produced no state")
 
         elapsed = (datetime.now(tz=tz) - t_now).total_seconds()
         time.sleep(max(0, config.log_interval - elapsed))

@@ -64,8 +64,32 @@ class SystemSafetyAgent(BaseAgent):
         return not (cfg.enabled is False and cfg.confirmed_disable is True)
 
     @staticmethod
-    def _safety_metrics(bcfg):
+    def _temp_spec(bcfg, label, value):
+        """One temperature metric. Every probe gets the battery's own numbers.
+
+        There is one set of temperature limits because there is one compartment:
+        the cell spec's 5–45 °C is what the box has to stay inside, whether the
+        sensor reading it hangs on the battery, the DC cable or the air. Give a
+        probe its own thresholds only when it measures something with a different
+        rating, and then it needs its own `battery`-style config block, not a
+        second literal here.
+        """
         return {
+            "value": value,
+            "min": bcfg.min_temp,
+            "max": bcfg.max_temp,
+            "warn_min": bcfg.warn_min_temp,
+            "warn_max": bcfg.warn_max_temp,
+            "label": label,
+            "fmt": ".1f",
+            "unit": "°C",
+            "action": {"min": _MIN_ACTIONS, "max": _MAX_ACTIONS},
+            "veto": {"max": _MAX_VETOES},
+        }
+
+    @classmethod
+    def _safety_metrics(cls, bcfg, current):
+        metrics = {
             "voltage": {
                 "value": lambda s: s.battery_voltage,
                 "min": bcfg.min_voltage,
@@ -78,18 +102,7 @@ class SystemSafetyAgent(BaseAgent):
                 "action": {"min": _MIN_ACTIONS, "max": _MAX_ACTIONS},
                 "veto": {"max": _MAX_VETOES},
             },
-            "temp": {
-                "value": lambda s: s.battery_temp,
-                "min": bcfg.min_temp,
-                "max": bcfg.max_temp,
-                "warn_min": bcfg.warn_min_temp,
-                "warn_max": bcfg.warn_max_temp,
-                "label": "temperature",
-                "fmt": ".1f",
-                "unit": "°C",
-                "action": {"min": _MIN_ACTIONS, "max": _MAX_ACTIONS},
-                "veto": {"max": _MAX_VETOES},
-            },
+            "temp": cls._temp_spec(bcfg, "temperature", lambda s: s.battery_temp),
             "ac_load": {
                 "value": lambda s: s.ac_load_w,
                 "min": None,
@@ -102,6 +115,14 @@ class SystemSafetyAgent(BaseAgent):
                 "action": {"max": _AC_OVERLOAD_ACTIONS},
             },
         }
+
+        # The standalone probes, one metric each, from whatever `state.json` had.
+        # Sorted so the rationale line does not reorder itself between ticks.
+        for name in sorted(current.sensor_temps):
+            metrics[f"temp_{name}"] = cls._temp_spec(
+                bcfg, f"{name} temperature", lambda s, n=name: s.sensor_temps[n]
+            )
+        return metrics
 
     @staticmethod
     def _cooling_metrics(bcfg):
@@ -125,7 +146,7 @@ class SystemSafetyAgent(BaseAgent):
         actions = []
         vetoes = {}                 # mode -> why it is being held off
 
-        for key, spec in self._safety_metrics(config.battery).items():
+        for key, spec in self._safety_metrics(config.battery, current).items():
             value = spec["value"](current)
             fmt, unit = spec["fmt"], spec.get("unit", "")
             margins = []

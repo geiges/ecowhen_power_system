@@ -45,6 +45,7 @@ Start order **① → ② and ③ → ④**. ② and ③ are independent; ④ ne
 
 ```
 paths.py                RUNTIME_DIR (tmpfs, ephemeral) vs DATA_DIR (durable). Both env-overridable.
+health.py               Process heartbeats: `beat()` in each loop, `snapshot()` for GET /health.
 config_default.py       THE calibration for this installation. Physical measurements — never retype.
                         One `system_components` list; `aggregation.AUX_POWER_COLUMNS` is the
                         one thing a new plug does not get for free.
@@ -80,7 +81,11 @@ Both produced by the Power System, in `RUNTIME_DIR`.
 - **`state.json`** — raw bus readings verbatim, plus derived `battery/voltage`,
   `battery/current`, `battery/voltage_spread`, `SOC_Kf`, `SOC_counted`,
   `time_to_low_battery`, `soc_above_threshold_since`, aux power keys, and a tz-aware ISO
-  `timestamp`.
+  `timestamp`. Every plain `<component>/temperature` key (the DS18B20 probes) is collected
+  by name into `CurrentState.sensor_temps`, and the safety agent watches each one on the
+  battery's own limits — one compartment, one rating — so a probe added to
+  `system_components` is supervised with no second edit, and one that stops reporting
+  drops out rather than reading as 0 °C.
 
 **`system/battery_voltage` and every `mppt*/DC_0_voltage` are raw terminal readings.** The
 derived clamp values are `battery/*`. Anything wanting the number the estimator uses reads
@@ -113,10 +118,15 @@ is exactly why the service on top of it is called `deye_inverter`.
 
 | mode | primary service | prerequisites |
 |---|---|---|
-| `wallbox` | `wallbox_charger` | `multiplus_ac`, `mppt100_dc_load` |
+| `wallbox` | `wallbox_charger` | `multiplus_ac` |
 | `ac_solar` | `deye_inverter` | `multiplus_ac` |
 | `ac_other` | `other_ac_supply` | `multiplus_ac` (and `blocked_by` `wallbox`) |
 | `cooling` | — | `mppt100_dc_load` |
+
+**Temporary:** the MPPT's load switch is broken, so cooling is wired to run off the AC
+inverter instead. `wallbox` therefore no longer requires `mppt100_dc_load` — it gets
+cooling for free via `multiplus_ac`. Put the prerequisite back when the switch works.
+Safety still requests the `cooling` mode; it never blocked on it.
 | `ac_on` | — | `multiplus_ac` — the user's "I want mains" |
 
 A mode's **primary** service is the one it holds only once its prerequisites are satisfied,
@@ -375,6 +385,7 @@ lengthening one past ~8 minutes means raising this too.
 ## REST (Gateway, port 5101)
 
 ```
+GET  /health                         every process's status — no key, always 200
 GET  /actuators/                     list
 GET  /actuators/<name>               {"value": .., "on": true|false|null}; from memory
                                      unless ?max_age=<s> — see "Things that will bite you"
@@ -397,13 +408,36 @@ GET  /files/runtime/… | /files/data/…
 to cover the slowest agent's interval** or a planner reads as `last_result: null` — see below.
 
 `schema` is what a settings form needs and `asdict` drops: per field its declared **type**,
-dataclass **default**, **unit** and **help**. It is read off `dataclasses.fields`, so a knob
-added to an agent config appears in the dashboard's gear panel with no second edit. Units and
-help come from `knob(default, unit, help)` in `control/config.py` — a thin `field(metadata=…)`
-wrapper; a field declared plainly still appears, just bare. The type is published because the
+dataclass **default**, **unit**, **help** and whether it is **editable**. It is read off
+`dataclasses.fields`, so a knob added to an agent config appears in the dashboard's gear panel
+with no second edit. Those come from `knob(default, unit, help, editable=True)` in
+`control/config.py` — a thin `field(metadata=…)` wrapper; a field declared plainly still
+appears, just bare and **not editable**, because opting a knob into a browser form should be
+deliberate. `editable=False` marks what describes the installation rather than how to run it
+(`inverter_efficiency`, `interval_seconds`): the dashboard shows it greyed
+and never writes it, while `PUT /control/config` still accepts it — the right friction for a
+number that changes when the hardware does. The type is published because the
 *value* has none when it is null, which `interval_seconds` always is until somebody overrules
 the agent. Edits go back through `PUT /control/config`, which validates the whole tree — there
 is no per-agent write endpoint and no second validator.
+
+### Health
+
+**Every process writes `health_<name>.json` into RUNTIME_DIR at the end of each loop
+iteration; `GET /health` judges them.** The split is the point: a writer only records what
+already happened (stamp, its own interval, and the last cycle's error if there was one) and
+never claims to be healthy, because a hung process would keep claiming it. Liveness is
+*age*, and age is the reader's call. Four statuses, and a boolean "is it up" cannot tell
+them apart: `down` (no file — never started, or restarted since boot), `stale` (older than
+3 intervals or 30 s, whichever is longer: the loop stopped turning), `error` (turning, but
+the last cycle raised — `detail` says what), `ok`.
+
+The **Gateway has no file**: answering the request is its heartbeat, and a client that gets
+no answer has learnt the same thing. `/health` is unauthenticated — it is the fallback when
+nothing else answers — and always 200, because `status: degraded` in the body is the answer
+a dashboard renders, not an exception it has to catch. Ephemeral on purpose: a heartbeat
+surviving a reboot would describe the previous boot. `health.py` owns both sides, so a UI
+can also read the raw files through `/files/runtime/health_control.json`.
 
 **Two file endpoints, and the split matters to consumers:** `runtime` serves the contracts
 (`state.json`, `system_configuration.yaml`, the status files), `data` serves the durable time

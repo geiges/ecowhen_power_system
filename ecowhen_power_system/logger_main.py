@@ -18,7 +18,7 @@ from datetime import datetime, timedelta
 import pytz
 
 from . import aggregation, config_default as config
-from . import discovery, logger, paths
+from . import discovery, health, logger, paths
 
 # How far behind state.json may fall before it is worth saying so out loud. The
 # Power System republishes every log_interval; several missed in a row means it died,
@@ -123,6 +123,10 @@ def main(argv=None) -> int:
     while True:
         t_now = datetime.now(tz=tz)
         process.step(t_now)
+        # Unconditional: the heartbeat says this loop is turning, not that there was
+        # anything to log. A quiet sink with nothing new is healthy — it is the
+        # *Power System* that has gone quiet, and that shows up as its own heartbeat.
+        health.beat("logger", config.log_interval, datetime.now(tz=tz))
         elapsed = (datetime.now(tz=tz) - t_now).total_seconds()
         time.sleep(max(0, config.log_interval - elapsed))
 
