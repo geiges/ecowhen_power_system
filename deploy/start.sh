@@ -1,15 +1,14 @@
 #!/bin/bash
-# Start the three processes in a tmux session. Run ON THE DEVICE.
+# Start the four processes in a tmux session. Run ON THE DEVICE.
 #
 #   ./deploy/start.sh [--restart] [--no-control]
 #
 #   --restart     kill an existing session and start fresh. Without it, an already
 #                 running session is left alone.
-#   --no-control  full-control mode without Control. This is the cutover step: the
-#                 Gateway accepts writes, so the VE.Direct and Tasmota transports
-#                 can be proven by hand — and they cannot be while Control runs,
-#                 because its coordinator drives every service back to target on
-#                 each tick and would undo the poke within 60 s.
+#   --no-control  everything but Control. The Gateway accepts writes, so a transport
+#                 can be proven by hand — and it cannot be while Control runs, because
+#                 its coordinator drives every service back to target on each tick and
+#                 would undo the poke within a tick or two.
 #
 # --extra device on every uv run is what keeps pydbus in the venv: it is an optional
 # extra so the tests install off-device (A3), so a plain `uv run` would leave it out
@@ -46,21 +45,6 @@ if tmux has-session -t "$ECOPS_SESSION" 2>/dev/null; then
     fi
 fi
 
-# Parallel mode is the safety interlock, not a preference: while the predecessor is
-# live it owns the hardware, and a second writer on the same actuator is the one
-# failure in this rebuild that can damage something.
-PS_FLAGS=""
-GW_FLAGS=""
-if [ "$ECOPS_PARALLEL" = "1" ]; then
-    PS_FLAGS="--no-startup-sequence"
-    GW_FLAGS="--read-only"
-    echo "--- PARALLEL MODE: read-only, the old system keeps control ---"
-else
-    echo "--- FULL CONTROL MODE: this system writes hardware ---"
-    echo "    The predecessor must NOT be running. Ctrl-C now if it is."
-    sleep 5
-fi
-
 export ECOPS_DATA_DIR ECOPS_RUNTIME_DIR
 mkdir -p "$ECOPS_DATA_DIR" "$ECOPS_RUNTIME_DIR"
 
@@ -72,25 +56,21 @@ run() {   # run <window> <command...>; keep the pane open so a crash is readable
 
 echo "--- starting session '$ECOPS_SESSION' ---"
 tmux new-session -d -s "$ECOPS_SESSION" -n power-system \
-    "cd '$PWD' && uv run --no-dev --extra device ecops-power-system $PS_FLAGS ; echo; echo '--- power-system exited ---'; read -p 'enter to close'"
+    "cd '$PWD' && uv run --no-dev --extra device ecops-power-system ; echo; echo '--- power-system exited ---'; read -p 'enter to close'"
 
 sleep 3     # let the topology contract appear before the Gateway looks for it
-run gateway "uv run --no-dev --extra device ecops-gateway --port $ECOPS_PORT $GW_FLAGS"
+run gateway "uv run --no-dev --extra device ecops-gateway --port $ECOPS_PORT"
 run logger  "uv run --no-dev --extra device ecops-logger"
 
-# Control is the exclusive step. In parallel mode the Gateway would refuse its every
-# POST anyway (403), so a Control running there would do nothing but log failures —
-# and the moment the interlock was lifted it would start actuating with no further
-# ceremony. It starts only in full-control mode, deliberately.
 STARTED="power-system, gateway (:$ECOPS_PORT), logger"
-if [ "$ECOPS_PARALLEL" != "1" ] && [ "$NO_CONTROL" -eq 0 ]; then
+if [ "$NO_CONTROL" -eq 0 ]; then
     run control "uv run --no-dev --extra device ecops-control"
     STARTED="$STARTED, control"
 fi
 
 echo
 echo "Started '$ECOPS_SESSION': $STARTED"
-if [ "$ECOPS_PARALLEL" != "1" ] && [ "$NO_CONTROL" -eq 1 ]; then
+if [ "$NO_CONTROL" -eq 1 ]; then
     echo
     echo "  CONTROL IS NOT RUNNING. Nothing is arbitrating the hardware — whatever"
     echo "  you switch by hand stays switched. Prove the write transports, then:"
@@ -99,4 +79,3 @@ fi
 echo "  attach:   tmux attach -t $ECOPS_SESSION"
 echo "  data:     $ECOPS_DATA_DIR"
 echo "  contracts:$ECOPS_RUNTIME_DIR"
-echo "  compare:  ./deploy/compare.py"

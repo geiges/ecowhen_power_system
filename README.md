@@ -59,13 +59,13 @@ is `deye_inverter`.
 | `ac_solar` | `deye_inverter` | `multiplus_ac` |
 | `ac_other` | `other_ac_supply` | `multiplus_ac` — and `blocked_by` `wallbox` |
 | `cooling` | — | `mppt100_dc_load` |
-| `ac_on` | — | `multiplus_ac` |
+| `main_ac` | — | `multiplus_ac` |
 
 The two tables are separate mappings; the rows do not line up across them.
 
 A mode's **primary** is the service it holds only once its prerequisites are
 satisfied, and lets go of first on the way down — that is the two-level ordering, and
-why a plug is not simply another prerequisite. `cooling` and `ac_on` have no primary:
+why a plug is not simply another prerequisite. `cooling` and `main_ac` have no primary:
 they *are* their requirements.
 
 `ac_other` declares `blocked_by=["wallbox"]`, one-sidedly, and **that declaration is

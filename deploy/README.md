@@ -1,40 +1,13 @@
-# Deploying phases 1–3 beside the live system
+# Deploying
 
-The predecessor keeps running and keeps control of the hardware. This deployment
-only *reads*, so both can sit on the same bus and every number can be compared
-against a working reference.
+This system has full control of the hardware. The predecessor
+(`/data/python/victron_system_monitor`) is stopped and stays stopped — two writers
+on one actuator is the one genuinely dangerous failure here. Reverting means killing
+the `ecops` tmux session and restarting its `control_runner.py`.
 
-```
-                    Venus OS box
-   /data/python/victron_system_monitor    ← still live, still in control
-   /data/python/ecowhen_power_system      ← this, read-only
-```
-
-## What keeps it safe
-
-Parallel mode is an interlock, not a habit. `ECOPS_PARALLEL=1` (the default in
-`config.sh`) passes two flags:
-
-| flag | effect |
-|---|---|
-| `ecops-power-system --no-startup-sequence` | skips the Multiplus measurement wake-up (A11) — **the only place the Power System writes D-Bus**. With it off, the process cannot write the bus at all |
-| `ecops-gateway --read-only` | every `POST /actuators/...` is a 403. Reads still work |
-
-Nothing else in phases 1–3 writes hardware. The Logger only writes CSVs.
-
-Everything else that could collide is separated too:
-
-| | old | new |
-|---|---|---|
-| project dir | `/data/python/victron_system_monitor` | `/data/python/ecowhen_power_system` |
-| REST port | 5100 | **5101** |
-| durable data | its own `data/` | `$ECOPS_REMOTE_DIR/data` |
-| ephemeral | — | `/dev/shm/ecowhen_power_system` |
-| tmux session | `victron` | `ecops` |
-
-The one real cost of running both: the two Tasmota plugs and the Deye get polled
-twice as often. They are HTTP GETs against devices the old system already polls
-every 5 s, so this doubles a load that is already small.
+Nothing collides while it is stopped, and nothing would if it were started by hand
+for a look: separate project dir, port 5101 against its 5100, its own `data/`, and
+tmux session `ecops` against `victron`.
 
 ## Doing it
 
@@ -48,7 +21,7 @@ every 5 s, so this doubles a load that is already small.
 
 ```sh
 ./deploy/install.sh                  # venv + deps + generate an API key
-./deploy/start.sh                    # tmux session 'ecops': 3 windows
+./deploy/start.sh                    # tmux session 'ecops': 4 windows
 tmux attach -t ecops                 # watch them
 ```
 
@@ -106,57 +79,24 @@ uv run --no-dev --extra device python -c "import pydbus; print('pydbus ok')"
 ```
 
 Add `--boot` to `install.sh` to also hook `/data/rc.local`, which Venus OS keeps
-across firmware updates. Leave that off while validating.
+across firmware updates.
 
 ## Checking it
 
-```sh
-./deploy/compare.py                  # one shot
-./deploy/compare.py --watch 30       # keep looking
-```
+`GET /health` is the first stop, then `GET /control/modes` and
+`data/control_log.jsonl` for what the brain thinks it is doing.
 
-This is the Phase 1 verification the plan has never been able to run: off a fake bus
-only key *names* could be checked. Here both systems poll the same hardware, so the
-values can be compared too.
+## Proving a write transport by hand
 
-Two things to hold in mind while reading it:
-
-1. **The samples are not simultaneous.** Each system polls on its own clock, so
-   anything moving differs by however far it moved. The gap is printed first. For the
-   strict comparison, pick a quiet moment — night, no load.
-2. **Some keys changed meaning, not just name.** Those are listed separately with the
-   reason. `system/battery_voltage` was the simulator's derived value and is now the
-   raw bus reading (A12); the derived one moved to `battery/voltage` and *is* compared
-   across that rename. The packed `state` code is positional and grew from 6 to 12
-   digits when A10 added three temperature sensors — compare `states_to_log` in
-   `system_configuration.yaml` instead.
-
-What "good" looks like: **0 missing**, the renamed pair agreeing to a few mV at rest,
-and every non-moving key identical.
-
-For the CSVs, the aggregation differential has already been run off-device against 151
-real days (A18); on-device, compare `data/log_*.csv` headers and spot-check a row.
-
-## Going to full control (phase 4, later)
-
-Stop the predecessor first — two writers on one actuator is the one genuinely
-dangerous failure in this rebuild. Then, in two steps:
+Control drives every service back to target on each tick, so a hand-switched fan is
+off again within a tick or two and the test tells you nothing. Start without it:
 
 ```sh
-ECOPS_PARALLEL=0 ./deploy/start.sh --restart --no-control   # 1. prove the writes
-ECOPS_PARALLEL=0 ./deploy/start.sh --restart                # 2. bring Control up
+./deploy/start.sh --restart --no-control    # nothing arbitrates; what you switch stays
+./deploy/start.sh --restart                 # Control back up
 ```
 
-`start.sh` prints a warning and waits 5 s before starting in either mode.
-
-**Why two steps.** The VE.Direct and Tasmota *write* transports have never run —
-parallel mode 403s every POST — and they can only be proven by hand. They cannot be
-proven while Control runs: its coordinator drives every service back to target on
-each tick, so a hand-switched fan is off again within 60 s and the test tells you
-nothing. Between the two commands, nothing arbitrates the hardware; whatever you
-switch stays switched.
-
-What to run in step 1, on `mppt100_load` and then `wallbox_relay`:
+What to run, on `mppt100_load` and then `wallbox_relay`:
 
 ```sh
 curl -s -H "X-API-Key: $ECOPS_API_KEY" -H 'Content-Type: application/json' \

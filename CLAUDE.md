@@ -66,7 +66,7 @@ control/                config, state, forecast, projection, gateway_client, ser
                         package, so the spike tests carry no hardware in their import graph),
                         actuation (this installation's services + modes), agents/, decision_log.
 tools/replay.py         Score estimator changes against recorded CSVs. Use this, not argument.
-deploy/                 push / install / start / doctor / compare. README.md is the procedure
+deploy/                 push / install / start / doctor. README.md is the procedure
                         and the reasoning behind the deployment's shape.
 ```
 
@@ -476,15 +476,17 @@ sat behind the noise with a failing test nobody read.
 ## Deployment
 
 `deploy/config.sh` holds the settings; `deploy/README.md` the procedure.
-`ECOPS_PARALLEL=1` (default) is an interlock, not a habit: it passes
-`--no-startup-sequence` and `--read-only`, so the package cannot write hardware at all while
-the predecessor is still live. `ECOPS_PARALLEL=0` is full control and requires the
-predecessor to be **confirmed stopped** — two writers on one actuator is the one genuinely
-dangerous failure mode here. `deploy/compare.py` diffs `state.json` against the predecessor's;
+`deploy/start.sh` brings the four processes up in tmux; `--no-control` leaves Control out,
+which is the only way to poke an actuator by hand without the coordinator undoing it.
 `deploy/doctor.sh` is for venv/`gi` problems.
 
-**Status:** cut over. All four processes run on the device with full control
-(`ECOPS_PARALLEL=0`); the predecessor is stopped. `GET /control/modes`, `/control/services`
+The predecessor is stopped and must stay stopped — two writers on one actuator is the one
+genuinely dangerous failure mode here. The parallel-mode interlock (`ECOPS_PARALLEL`,
+`--read-only`, forced `--no-startup-sequence`) is gone from the deploy scripts now that
+nothing runs beside this; the process flags themselves remain for manual use.
+
+**Status:** cut over. All four processes run on the device with full control;
+the predecessor is stopped. `GET /control/modes`, `/control/services`
 and `/control/schedule` say what it thinks it is doing, and `data/control_log.jsonl` says why.
 Revert = kill the `ecops` tmux session, restart the old `control_runner.py`.
 

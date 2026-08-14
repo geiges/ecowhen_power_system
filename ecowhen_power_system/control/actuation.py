@@ -23,7 +23,7 @@ the hardware it switches, a *mode* for what the user wants (A8):
     ac_solar    deye_inverter      multiplus_ac
     ac_other    other_ac_supply    multiplus_ac  (blocked_by wallbox)
     cooling     —                  mppt100_dc_load
-    ac_on       —                  multiplus_ac
+    main_ac     —                  multiplus_ac
 
 A mode's *primary* service is the one it holds only once its prerequisites are
 satisfied, and lets go of first on the way down. That is the two-level ordering, and
@@ -70,7 +70,7 @@ class ActuatorService(SystemService):
 class ServiceMode(Mode):
     """A mode is its services: prerequisites, plus at most one primary.
 
-    `cooling` and `ac_on` have no primary — they *are* their requirements, and
+    `cooling` and `main_ac` have no primary — they *are* their requirements, and
     reference counting is then the whole feature: whichever of cooling and wallbox
     lets go of the fans last is the one that switches them off.
     """
@@ -161,7 +161,7 @@ def build(gateway, config):
             ServiceMode("cooling", services,
                         required_services=["mppt100_dc_load"]),
             # The user's way to say "I want mains".
-            ServiceMode("ac_on", services, required_services=["multiplus_ac"]),
+            ServiceMode("main_ac", services, required_services=["multiplus_ac"]),
         )
     }
     return services, modes

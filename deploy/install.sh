@@ -107,6 +107,3 @@ fi
 
 echo
 echo "Installed. Start with:  ./deploy/start.sh"
-if [ "$ECOPS_PARALLEL" = "1" ]; then
-    echo "PARALLEL MODE: no D-Bus writes, no actuation. The old system keeps control."
-fi
