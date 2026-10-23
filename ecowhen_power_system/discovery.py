@@ -75,7 +75,14 @@ def _resolve_endpoint(spec, component, service, where):
 
     if transport == "dbus":
         state = _find_state(component, spec["state"], where)
-        on, off = _on_off_from_mapping(state.mapping, where)
+        # Derived from the component's own mapping by default — restating what the
+        # mapping already says is how the two drift apart. An actuator may still name
+        # the pair itself, which is the only way a three-valued state can back one:
+        # the chargers' mppt_mode has no "on" label to invert.
+        if "on" in spec and "off" in spec:
+            on, off = spec["on"], spec["off"]
+        else:
+            on, off = _on_off_from_mapping(state.mapping, where)
         endpoint = {
             "transport": "dbus",
             "service": service,

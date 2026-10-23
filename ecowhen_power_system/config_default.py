@@ -154,6 +154,8 @@ system_components = [
 # learns that "on" is the integer 3. The names this installation therefore has:
 #
 #   multiplus_mode        the Multiplus II inverter        (service multiplus_ac)
+#   mppt150_mode          the MPPT 150/35 solar charger    (service mppt150_charger)
+#   mppt100_mode          the MPPT 100/20 solar charger    (service mppt100_charger)
 #   mppt100_load          the mppt100's DC load output — wired to the battery-
 #                         compartment fan                  (service mppt100_dc_load)
 #   wallbox_relay         the wallbox charging plug        (service wallbox_charger)

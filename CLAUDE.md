@@ -99,8 +99,9 @@ CSVs.
 
 ## Actuators, services, modes
 
-Five actuators, resolved from the component classes onto the bus: `multiplus_mode`,
-`mppt100_load`, `wallbox_relay`, `ac_inverter_relay`, `ac_other_relay`.
+Seven actuators, resolved from the component classes onto the bus: `multiplus_mode`,
+`mppt150_mode`, `mppt100_mode`, `mppt100_load`, `wallbox_relay`, `ac_inverter_relay`,
+`ac_other_relay`.
 
 **Every actuator is a service, and a mode is a set of services.** The two layers are still
 deliberately named differently, and the rule is now explicit: a **service is named for the
@@ -112,6 +113,8 @@ is exactly why the service on top of it is called `deye_inverter`.
 |---|---|---|
 | `multiplus_ac` | `multiplus_mode` | the Multiplus II inverter |
 | `mppt100_dc_load` | `mppt100_load` | the MPPT's DC load output — the compartment fans |
+| `mppt150_charger` | `mppt150_mode` | the MPPT 150/35 solar charger |
+| `mppt100_charger` | `mppt100_mode` | the MPPT 100/20 solar charger |
 | `wallbox_charger` | `wallbox_relay` | the wallbox charging plug |
 | `deye_inverter` | `ac_inverter_relay` | mains to the Deye (the plug has no function of its own) |
 | `other_ac_supply` | `ac_other_relay` | the spare AC socket |
@@ -122,11 +125,16 @@ is exactly why the service on top of it is called `deye_inverter`.
 | `ac_solar` | `deye_inverter` | `multiplus_ac` |
 | `ac_other` | `other_ac_supply` | `multiplus_ac` (and `blocked_by` `wallbox`) |
 | `cooling` | — | `mppt100_dc_load` |
+| `dc_solar` | — | `mppt150_charger`, `mppt100_charger` |
 
 **Temporary:** the MPPT's load switch is broken, so cooling is wired to run off the AC
 inverter instead. `wallbox` therefore no longer requires `mppt100_dc_load` — it gets
 cooling for free via `multiplus_ac`. Put the prerequisite back when the switch works.
-Safety still requests the `cooling` mode; it never blocked on it.
+Safety still requests the `cooling` mode; it never blocked on it. The actuator itself is
+now **simulated by the Gateway** — `mppt100_load` is in `gateway/actuators.py`'s `DISABLED`,
+so a POST records the target and a GET replays it without touching VE.Direct or the bus.
+Nothing above the Gateway changes: safety still commands it, `mppt100_dc_load` still
+converges instead of burning its retries. Empty `DISABLED` when the switch works.
 | `ac_on` | — | `multiplus_ac` — the user's "I want mains" |
 
 A mode's **primary** service is the one it holds only once its prerequisites are satisfied,
@@ -148,9 +156,16 @@ is still wanted, the mode switches the plug back on** — it used to take a huma
 does not cycle on the limit, because safety *also* blocks the mode, and that block releases
 on `warn_max` rather than on the limit (see below).
 
-Only `multiplus_ac` and `mppt100_dc_load` carry a `services.*_default_on` knob. The three
-plugs do not: a socket nobody asked for is off, and a setting saying otherwise is a setting
-that switches the wallbox on by accident.
+Only `multiplus_ac`, `mppt100_dc_load` and the two chargers carry a `services.*_default_on`
+knob. The three plugs do not: a socket nobody asked for is off, and a setting saying otherwise
+is a setting that switches the wallbox on by accident.
+
+**`mppt_charger_default_on` is the one that defaults `true`**, and both chargers share it: a
+solar charger nobody has an opinion about should be charging. The consequence is that
+`dc_solar` can only ever switch them *on* — including back on after somebody switched one off
+at the device — and letting go of the mode changes nothing. Set it `false` and `dc_solar`
+becomes what decides whether the array charges at all. Nothing requests the mode today; it is
+the user's switch and the hook a future "battery full, stop charging" agent would use.
 
 ### Auto and manual
 
@@ -216,8 +231,11 @@ from under a mode still using it. Block the mode, and the service falls away by 
 `component_states`.** That list *is* the allowlist of what may be written. Deriving would also
 break on the first non-binary state — `mppt_mode` maps `{0: "ideal", 1: "working", 4: "off"}`
 with no `"on"` label, so `_on_off_from_mapping` raises. Where a mapping does carry on/off
-labels, on/off are derived from it rather than restated; a VE.Direct register carries no
-labels, which is why the fan is the one actuator declaring them per-actuator.
+labels, on/off are derived from it rather than restated; where it does not, the *actuator*
+names the pair (`on=1, off=4` for `mppt_mode`) rather than the mapping being relabelled,
+which would rewrite the logged state series and the dashboard that decodes it. `0` has never
+appeared in the recorded data and would read as unknown — see `on: null` below. A VE.Direct
+register carries no labels at all, which is why the fan declares them too.
 
 Agents name modes and nothing else — no actuator, no value, no ordering. There are two ways
 to want a mode, and both are resolved level-triggered on every tick:
@@ -459,7 +477,7 @@ would break the single-producer rule on that file.
 ## Working here
 
 ```bash
-uv run python -m pytest tests/     # 216 tests, green. Keep it that way.
+uv run python -m pytest tests/     # 225 tests, green. Keep it that way.
 uv run ecops-power-system --once   # single poll; --no-startup-sequence to never write the bus
 uv run ecops-control --dry-run     # run every agent, command nothing
 uv run ecops-logger --once

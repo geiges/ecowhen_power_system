@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 import pytest
 
 from ecowhen_power_system import config_default, discovery
-from ecowhen_power_system.gateway import transports
+from ecowhen_power_system.gateway import actuators, transports
 from ecowhen_power_system.gateway.app import create_app
 
 from conftest import MPPT100, MULTIPLUS, FakeBus
@@ -36,6 +36,17 @@ def client(fake_bus, system_config_file, runtime_dirs, monkeypatch):
     app = create_app(bus=fake_bus, system_config_path=system_config_file)
     app.config["TESTING"] = True
     return app.test_client()
+
+
+@pytest.fixture
+def live_fan(monkeypatch):
+    """Undo `actuators.DISABLED` for the tests about the fan's real transports.
+
+    The MPPT's load output is out of service and the Gateway simulates it, but the
+    VE.Direct write and the D-Bus confirm below are what has to still be right when
+    it comes back — so they are tested against hardware, not against the stand-in.
+    """
+    monkeypatch.setattr(actuators, "DISABLED", set())
 
 
 @pytest.fixture
@@ -148,7 +159,7 @@ def test_read_only_refuses_actuation_but_still_reads(fake_bus, system_config_fil
 def test_actuators_come_from_the_topology_contract(client):
     body = client.get("/actuators/", headers=AUTH).get_json()
     assert set(body["actuators"]) == {
-        "multiplus_mode", "mppt100_load",
+        "multiplus_mode", "mppt100_load", "mppt150_mode", "mppt100_mode",
         "wallbox_relay", "ac_inverter_relay", "ac_other_relay",
     }
 
@@ -243,7 +254,7 @@ def test_an_unrecognised_reading_is_unknown_not_off(client, bus_values):
     assert body["on"] is None
 
 
-def test_the_fan_is_on_at_exactly_the_threshold(client, bus_values):
+def test_the_fan_is_on_at_exactly_the_threshold(client, bus_values, live_fan):
     """The fans draw 0.1 A, which *is* the threshold, so the comparison must be >=.
     A `>` here reads a running fan as stopped and the service flaps it forever."""
     bus_values[MPPT100]["/Load/State"] = 1
@@ -255,7 +266,7 @@ def test_the_fan_is_on_at_exactly_the_threshold(client, bus_values):
     assert body["measured"] == 0.1
 
 
-def test_a_fan_that_claims_on_without_current_is_off(client, bus_values):
+def test_a_fan_that_claims_on_without_current_is_off(client, bus_values, live_fan):
     """The failure the confirm exists for: the register took the write, the output
     says on, and nothing is turning. Reporting off makes the service retry and then
     fail loudly — reporting null would leave it waiting forever."""
@@ -268,7 +279,8 @@ def test_a_fan_that_claims_on_without_current_is_off(client, bus_values):
     assert body["measured"] == 0.0
 
 
-def test_the_fan_read_never_uses_the_registers_value_space(client, bus_values):
+def test_the_fan_read_never_uses_the_registers_value_space(client, bus_values,
+                                                           live_fan):
     """The bug that jammed the fan on the device: /Load/State == 1 was read as the
     register's 1 and labelled "off", so a fan that had come up read as still off.
     The service mismatched every tick, drove again, and burned its retries."""
@@ -350,7 +362,8 @@ def test_a_new_topology_forgets_the_old_readings(client, bus_values,
 # A9: the fan writes VE.Direct and reads D-Bus, in different value spaces
 # ---------------------------------------------------------------------------
 
-def test_the_fan_writes_vedirect_with_the_registers_own_off_value(client, vregd_calls):
+def test_the_fan_writes_vedirect_with_the_registers_own_off_value(client, vregd_calls,
+                                                                  live_fan):
     resp = client.post("/actuators/mppt100_load", json={"on": False}, headers=AUTH)
 
     assert resp.status_code == 200
@@ -361,7 +374,7 @@ def test_the_fan_writes_vedirect_with_the_registers_own_off_value(client, vregd_
 
 
 def test_the_fan_reads_dbus_where_off_is_a_different_number(client, bus_values,
-                                                            vregd_calls):
+                                                            vregd_calls, live_fan):
     """The register's on is 4, the bus's is 1, and off is 0 on both by coincidence
     rather than by correspondence. If the read ever collapses back onto the write's
     value space a reconcile loop calls a correct state a mismatch and flaps the fan.
@@ -376,7 +389,27 @@ def test_the_fan_reads_dbus_where_off_is_a_different_number(client, bus_values,
     assert vregd_calls == []          # the read never touched VE.Direct
 
 
-def test_a_failing_vregd_is_reported_not_swallowed(client, monkeypatch):
+def test_a_disabled_actuator_is_simulated_not_written(client, bus_values, vregd_calls):
+    """The MPPT's load output is broken, so the Gateway answers for it. Everything
+    above keeps commanding `mppt100_load` — the safety agent, the `cooling` mode —
+    and gets an actuator that converges, while no bus is touched either way."""
+    assert client.get("/actuators/mppt100_load", headers=AUTH).get_json()["on"] is False
+
+    resp = client.post("/actuators/mppt100_load", json={"on": True}, headers=AUTH)
+    assert resp.get_json() == {"actuator": "mppt100_load", "on": True,
+                               "value_written": None, "disabled": True}
+
+    # Read back what was commanded, from nowhere near the hardware.
+    body = client.get("/actuators/mppt100_load?max_age=0", headers=AUTH).get_json()
+    assert body["on"] is True and body["disabled"] is True
+    assert vregd_calls == []
+    assert bus_values[MPPT100]["/Load/State"] == 0      # never left the Gateway
+
+    assert client.get("/actuators/", headers=AUTH).get_json()[
+        "actuators"]["mppt100_load"]["disabled"] is True
+
+
+def test_a_failing_vregd_is_reported_not_swallowed(client, monkeypatch, live_fan):
     class _Result:
         returncode = 1
         stdout = ""

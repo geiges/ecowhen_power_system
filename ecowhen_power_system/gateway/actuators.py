@@ -40,6 +40,14 @@ which is what this is here to stop. The cost is that a device changed behind the
 Gateway's back (the plug's physical button, a power cut) stays wrong until something
 writes it or asks for `max_age=0`.
 
+A disabled actuator is simulated
+--------------------------------
+`DISABLED` names actuators whose hardware is out of service (`mppt100_load`: the
+MPPT's load output is broken). They stay in the registry and keep answering — a POST
+records the target, a GET replays it — so callers above the Gateway need no edit and
+no special case, and nothing sits retrying a device that cannot answer. Both bodies
+carry `"disabled": true`, and so does the listing.
+
 Unless the read declares a `confirm`
 -----------------------------------
 Then the state is only a veto and a measurement decides — the fan's /Load/State
@@ -56,6 +64,14 @@ from . import transports
 actuators_bp = Blueprint("actuators", __name__)
 
 CACHE_MAX_AGE = None        # seconds an entry may be reused; None = it never expires
+
+# ponytail: the MPPT's load output is broken, so this actuator is simulated — a POST
+# records the target and a GET answers it, without ever touching the bus. Everything
+# above (the safety agent, the `cooling` mode, `mppt100_dc_load`) keeps working
+# against an actuator that converges instead of failing. Empty this set when the load
+# switch is repaired; the transports below are untouched and still covered by tests.
+DISABLED = {"mppt100_load"}
+_simulated = {}             # disabled actuator -> the last target it was commanded to
 
 
 def _registry():
@@ -109,6 +125,7 @@ def list_actuators():
                 "description": a.get("description", ""),
                 "available": a.get("available", False),
                 "transport": a.get("write", {}).get("transport"),
+                "disabled": name in DISABLED,
             }
             for name, a in _registry().items()
         }
@@ -144,6 +161,14 @@ def read_actuator(name: str):
     actuator, err = _lookup(name)
     if err:
         return err
+
+    if name in DISABLED:
+        # No cache and no bus: the answer is whatever was last commanded, and off
+        # until something commands it. Not null — a service waits on null forever.
+        on = _simulated.get(name, False)
+        ep = actuator["read"]
+        return jsonify({"actuator": name, "value": ep["on"] if on else ep["off"],
+                        "on": on, "disabled": True}), 200
 
     max_age = request.args.get("max_age", CACHE_MAX_AGE, type=float)
     remembered = _state().get(name)
@@ -183,6 +208,13 @@ def command_actuator(name: str):
         return err
 
     ep = actuator["write"]
+    if name in DISABLED:
+        _simulated[name] = target
+        current_app.logger.info("actuator %s is disabled — recorded %s, wrote nothing",
+                                name, target)
+        return jsonify({"actuator": name, "on": target, "value_written": None,
+                        "disabled": True})
+
     value = ep["on"] if target else ep["off"]
     written, error = transports.write(current_app.config["BUS"], ep, value)
     # Unconditionally, and before the error check: a write that reported a failure

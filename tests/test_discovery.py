@@ -7,7 +7,7 @@ from ecowhen_power_system.manufacturer.victron import (VictronMultiplusII,
                                                        VictronSolarMPPT,
                                                        VictronSolarMPPTWithDCLoad)
 
-from conftest import MPPT100, MULTIPLUS, FakeBus, phoenix_service
+from conftest import MPPT100, MPPT150, MULTIPLUS, FakeBus, phoenix_service
 
 
 MULTIPLUS_ON, MULTIPLUS_OFF = 3, 4
@@ -90,6 +90,25 @@ def test_dbus_actuator_derives_on_off_from_the_component_mapping(system_config):
         "off": 4,
     }
     assert act["read"] == act["write"]
+
+
+def test_charger_mode_actuator_states_its_own_on_off(system_config):
+    """mppt_mode is three-valued ({0: ideal, 1: working, 4: off}) — nothing to invert.
+
+    So this actuator names the pair itself, which is the only reason it can exist.
+    Both chargers carry it: 1 is charging, 4 is off, and a 0 would read as unknown.
+    """
+    for name, service in (("mppt150_mode", MPPT150), ("mppt100_mode", MPPT100)):
+        act = system_config["actuators"][name]
+        assert act["available"]
+        assert act["write"] == {
+            "transport": "dbus",
+            "service": service,
+            "path": "/Mode",
+            "on": 1,
+            "off": 4,
+        }
+        assert act["read"] == act["write"]
 
 
 def test_fan_actuator_is_asymmetric_write_vedirect_read_dbus(system_config):

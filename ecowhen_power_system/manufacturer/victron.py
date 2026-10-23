@@ -217,6 +217,22 @@ class VictronSystem(VictronBaseComponent):
         
         
     
+# Both charger models switch the same way, so the declaration is written once and
+# used twice: /Mode, where 1 is charging and 4 is off.
+#
+# on/off are stated here rather than derived from the mppt_mode mapping, which is
+# three-valued ({0: "ideal", 1: "working", 4: "off"}) and has no "on" label to invert.
+# Relabelling it would rewrite the logged state series and the dashboard reading it.
+# 0 appears nowhere in the recorded data; were it ever read it comes back as unknown,
+# which is the honest answer for a mode that is neither on nor off.
+MPPT_MODE_ACTUATOR = ActuatorType(
+    basename='mode',
+    description='Solar charger on/off',
+    write=dict(transport='dbus', state='mppt_mode', on=1, off=4),
+    read=dict(transport='dbus', state='mppt_mode', on=1, off=4),
+)
+
+
 class VictronSolarMPPT(VictronBaseComponent):
     """
     Victron solar MPPT component
@@ -231,8 +247,9 @@ class VictronSolarMPPT(VictronBaseComponent):
         StateType(basename = 'tracking_state', subaddress='/State', mapping= {0 : 'off', 3: "bulk", 4: "absorbtion", 5: "float"}),
         StateType(basename = 'mppt_mode', subaddress='/Mode', mapping= {0: "ideal", 1: "working", 4: "off"}),
         ]
-    
-    
+    component_actuators = [MPPT_MODE_ACTUATOR]
+
+
     def __init__(self, product_name, short_name, const_consumption=0.0, connected_PV=None):
          
         component_type = 'com.victronenergy.solarcharger'
@@ -264,6 +281,7 @@ class VictronSolarMPPTWithDCLoad(VictronBaseComponent):
         VeDirectSetType(basename='load_control', register=0xEDAB, allowed_values=[0, 1, 4, 5]),
     ]
     component_actuators = [
+        MPPT_MODE_ACTUATOR,
         # ASYMMETRIC, and that is a property of this model: /Load/State is read-only,
         # so writes go out over VE.Direct HEX while reads come back over D-Bus — in
         # *unrelated value spaces*. The register takes 0/1/4/5 and "on" is 4; D-Bus

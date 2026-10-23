@@ -1,4 +1,4 @@
-"""What this installation actually has: five services, five modes.
+"""What this installation actually has: seven services, six modes.
 
 The spike's `service.py` / `mode.py` are abstract on purpose — they own the state
 machines and know nothing about hardware. Everything hardware-shaped is here, and it
@@ -12,6 +12,8 @@ the hardware it switches, a *mode* for what the user wants (A8):
     ---------------    ----------------------     ---------------------------------
     multiplus_ac       multiplus_mode             the Multiplus II inverter
     mppt100_dc_load    mppt100_load               the MPPT's DC load — the fans
+    mppt150_charger    mppt150_mode               the MPPT 150/35 solar charger
+    mppt100_charger    mppt100_mode               the MPPT 100/20 solar charger
     wallbox_charger    wallbox_relay              the wallbox charging plug
     deye_inverter      ac_inverter_relay          mains to the Deye (the plug has no
                                                   function of its own)
@@ -24,6 +26,7 @@ the hardware it switches, a *mode* for what the user wants (A8):
     ac_other    other_ac_supply    multiplus_ac  (blocked_by wallbox)
     cooling     —                  mppt100_dc_load
     main_ac     —                  multiplus_ac
+    dc_solar    —                  mppt150_charger, mppt100_charger
 
 A mode's *primary* service is the one it holds only once its prerequisites are
 satisfied, and lets go of first on the way down. That is the two-level ordering, and
@@ -131,6 +134,12 @@ def build(gateway, config):
                         default_on=config.services.multiplus_ac_default_on),
         ActuatorService("mppt100_dc_load", "mppt100_load", gateway,
                         default_on=config.services.mppt100_dc_load_default_on),
+        # The two solar chargers. Their default is *on*: a charger nobody has an
+        # opinion about should be charging, which is why the knob exists at all.
+        ActuatorService("mppt150_charger", "mppt150_mode", gateway,
+                        default_on=config.services.mppt_charger_default_on),
+        ActuatorService("mppt100_charger", "mppt100_mode", gateway,
+                        default_on=config.services.mppt_charger_default_on),
         # The three plugs. No default_on knob: a socket nobody asked for is off.
         ActuatorService("wallbox_charger", "wallbox_relay", gateway),
         ActuatorService("deye_inverter", "ac_inverter_relay", gateway),
@@ -162,6 +171,13 @@ def build(gateway, config):
                         required_services=["mppt100_dc_load"]),
             # The user's way to say "I want mains".
             ServiceMode("main_ac", services, required_services=["multiplus_ac"]),
+            # Both chargers under one switch. No primary: they *are* the mode, and
+            # neither has to come up before the other. While
+            # `mppt_charger_default_on` stays True this can only ever switch them on
+            # — including back on after somebody switched one off by hand. Set it
+            # False and dc_solar becomes what decides whether the array charges.
+            ServiceMode("dc_solar", services,
+                        required_services=["mppt150_charger", "mppt100_charger"]),
         )
     }
     return services, modes

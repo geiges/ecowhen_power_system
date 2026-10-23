@@ -529,6 +529,41 @@ def want(system, *modes):
     ])
 
 
+def test_dc_solar_holds_both_chargers_and_never_switches_them_off(system):
+    """One mode, two chargers — and letting go of it must not stop the array.
+
+    The risk here is the mirror image of the wallbox's: `mppt_charger_default_on` is
+    True, so a release reverts to *on*. A mode nobody asks for switching the solar
+    charging off would be the expensive way to find that out.
+    """
+    want(system, ("dc_solar", "user"))
+    assert tick_until(system, lambda: system.modes["dc_solar"].state == "active")
+    assert system.gateway.actual["mppt150_mode"] is True
+    assert system.gateway.actual["mppt100_mode"] is True
+
+    want(system)                                    # silence is release
+    for _ in range(3):
+        system.coordinator.tick(system.config)
+    assert ("mppt150_mode", False) not in system.gateway.commands
+    assert ("mppt100_mode", False) not in system.gateway.commands
+
+
+def test_dc_solar_switches_the_chargers_off_once_the_default_says_off(config):
+    """With the knob flipped the mode is a real lever: no requester, no charging."""
+    config.services.mppt_charger_default_on = False
+    gateway = FakeGateway(latency=1)
+    services, modes = actuation.build(gateway, config)
+    system = SimpleNamespace(gateway=gateway, services=services, modes=modes,
+                             coordinator=Coordinator(services, modes), config=config)
+
+    want(system, ("dc_solar", "user"))
+    assert tick_until(system, lambda: system.modes["dc_solar"].state == "active")
+
+    want(system)
+    assert tick_until(system, lambda: gateway.actual["mppt150_mode"] is False)
+    assert gateway.actual["mppt100_mode"] is False
+
+
 def test_the_wallbox_waits_for_the_inverter(system):
     """The plan's live round trip, off-device: activate → services converge → plug on.
 
@@ -673,11 +708,11 @@ def test_a_cycle_publishes_both_status_files(unit, runtime_dirs):
     modes = json.loads(runtime_dirs.MODES_STATUS_PATH.read_text())
     services = json.loads(runtime_dirs.SERVICES_STATUS_PATH.read_text())
     assert set(modes["modes"]) == {
-        "wallbox", "ac_solar", "ac_other", "cooling", "main_ac",
+        "wallbox", "ac_solar", "ac_other", "cooling", "main_ac", "dc_solar",
     }
     assert set(services["services"]) == {
-        "multiplus_ac", "mppt100_dc_load", "wallbox_charger", "deye_inverter",
-        "other_ac_supply",
+        "multiplus_ac", "mppt100_dc_load", "mppt150_charger", "mppt100_charger",
+        "wallbox_charger", "deye_inverter", "other_ac_supply",
     }
 
 

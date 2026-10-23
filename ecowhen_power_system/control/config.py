@@ -141,17 +141,21 @@ class GatewayConfig(_FromDict):
 class ServicesConfig(_FromDict):
     """What a service reverts to when no mode requires it.
 
-    Off, for both: "nobody needs the inverter, so switch it off" *is* the declarative
-    model — it is what the predecessor's `wallbox_off` sequence did by hand. It is
-    also the one setting that changes what happens on an otherwise quiet system, so
-    it is a knob rather than a constant.
+    Off, for the inverter and the fan: "nobody needs the inverter, so switch it off"
+    *is* the declarative model — it is what the predecessor's `wallbox_off` sequence
+    did by hand. It is also the one setting that changes what happens on an otherwise
+    quiet system, so it is a knob rather than a constant.
 
-    Only these two. The three plugs are services as well now, but a socket nobody
-    asked for is off, and a knob saying otherwise is a knob to switch the wallbox on
-    by accident.
+    The solar chargers are the exception and default *on* — see below. The three plugs
+    carry no knob at all: a socket nobody asked for is off, and a knob saying otherwise
+    is a knob to switch the wallbox on by accident.
     """
     multiplus_ac_default_on: bool = False
     mppt100_dc_load_default_on: bool = False
+    # The exception, and the reason it is a knob: the solar chargers default *on*.
+    # A charger nobody asked about should be charging, so `dc_solar` only ever
+    # switches them on while this stands. Set it False to let the mode decide.
+    mppt_charger_default_on: bool = True
 
 
 @dataclass

@@ -75,28 +75,37 @@ def test_unreadable_state_becomes_none_then_encodes_as_nine(fake_bus, system_con
     assert "9" in code
 
 
-# --- SOC threshold tracking (replaces control's sim_*.csv globbing) -----------
-
 def test_soc_tracker_clock_starts_on_the_rise_above_threshold():
     t0 = datetime(2026, 7, 15, 12, 0)
     tracker = poll.SocTracker()
+    print(tracker.SOC_FULL_THRESHOLD)
+    tracker.update(tracker.SOC_FULL_THRESHOLD-0.1, t0)
+    assert tracker.minutes_soc_above_treshold(t0) == 0.0
 
-    assert tracker.update(0.95, t0) is None
-    assert tracker.minutes(t0) == 0.0
+    tracker.update(tracker.SOC_FULL_THRESHOLD+0.1, t0 + timedelta(minutes=1))
+    assert tracker.minutes_soc_above_treshold(t0 + timedelta(minutes=31)) == pytest.approx(30.0)
 
-    tracker.update(0.995, t0 + timedelta(minutes=1))
-    assert tracker.minutes(t0 + timedelta(minutes=31)) == pytest.approx(30.0)
-
+def test_soc_tracker_last_full():
+    t0 = datetime(2026, 7, 15, 12, 0)
+    tracker = poll.SocTracker()
+    
+    
+    assert tracker.last_time_above_threshold() is None
+    
+    tracker.update(tracker.SOC_FULL_THRESHOLD+0.1, t0)
+    
+    assert tracker.last_time_above_threshold() == t0
+    
 
 def test_soc_tracker_clock_resets_when_soc_drops():
     t0 = datetime(2026, 7, 15, 12, 0)
     tracker = poll.SocTracker()
     tracker.update(1.0, t0)
-    assert tracker.minutes(t0 + timedelta(minutes=10)) == pytest.approx(10.0)
+    assert tracker.minutes_soc_above_treshold(t0 + timedelta(minutes=10)) == pytest.approx(10.0)
 
     tracker.update(0.5, t0 + timedelta(minutes=11))
-    assert tracker.since is None
-    assert tracker.minutes(t0 + timedelta(minutes=12)) == 0.0
+    assert tracker.above_threshold_since is None
+    assert tracker.minutes_soc_above_treshold(t0 + timedelta(minutes=12)) == 0.0
 
 
 def test_soc_tracker_survives_midnight():
@@ -104,7 +113,7 @@ def test_soc_tracker_survives_midnight():
     battery full since 18:00 reported "full for 5 minutes" at 00:05."""
     tracker = poll.SocTracker()
     tracker.update(1.0, datetime(2026, 7, 15, 18, 0))
-    assert tracker.minutes(datetime(2026, 7, 16, 0, 5)) == pytest.approx(365.0)
+    assert tracker.minutes_soc_above_treshold(datetime(2026, 7, 16, 0, 5)) == pytest.approx(365.0)
 
 
 # --- SOC persistence (replaces reading back the Logger's sim_*.csv) -----------

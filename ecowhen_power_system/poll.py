@@ -16,8 +16,6 @@ temperature, so "read the sensors" and "estimate SOC" are not separable steps.
 import json
 from datetime import datetime, timedelta
 
-# Matches the default in the predecessor's control/state.py:minutes_at_full_soc.
-SOC_FULL_THRESHOLD = 0.99
 
 # Variables summed across components into a single system-level figure.
 STATE_VARIABLES_TO_SUM = ["power_yield", "total_yield"]
@@ -76,38 +74,48 @@ def retrieve_aux_data(http_components, debug=False) -> dict:
             print(f"[power_system] aux fetch failed for {component.short_name}: {exc}")
     return data
 
-
-class SocTracker:
-    """Tracks how long SOC has been continuously at or above the full threshold.
-
-    Exists so Control can stop globbing `sim_*.csv` — the Logger is a pure sink and
-    nothing may read it. Control reads `soc_above_threshold_since` out of state.json
-    and subtracts.
-
-    This also fixes a quirk of the predecessor, which recomputed the answer by
-    scanning the current day's sim CSV: at midnight a fresh CSV began, so a battery
-    that had been full since 18:00 reported "full for 5 minutes" at 00:05. Tracking
-    the crossing directly, and persisting it, makes midnight uneventful.
+class Averager:
     """
+    The Averager is used to build x minute averages for configured values dependent 
+    on the configuration. Each average is reset after a restart and initiated 
+    with zeros.
+    """
+    def __init__(self, config):
+        pass
+        
+class SocTracker:
+    """Tracks SOC metrics over time
+    1) time of SOC above treshold
+    2) Last time SOC over treshold
+    """
+    SOC_FULL_THRESHOLD = 0.99
 
-    def __init__(self, since=None, threshold=SOC_FULL_THRESHOLD):
+
+    def __init__(self, above_threshold_since=None, threshold=SOC_FULL_THRESHOLD):
         self.threshold = threshold
-        self.since = since        # datetime of the rise above threshold, or None
-
+        self.above_threshold_since = above_threshold_since        # datetime of the rise above threshold, or None
+        self.last_above_threshold = None # new system init
+        
     def update(self, soc, t_now):
         if soc is None:
-            return self.since
+            return self.above_threshold_since
+        
+        if soc >= self.threshold:
+            self.last_above_threshold = t_now
+            
         if soc < self.threshold:
-            self.since = None            # below: the clock is not running
-        elif self.since is None:
-            self.since = t_now           # just crossed up: start the clock
-        return self.since
+            self.above_threshold_since = None            # below: the clock is not running
+        elif self.above_threshold_since is None:
+            self.above_threshold_since = t_now           # just crossed up: start the clock
+        return self.above_threshold_since
 
-    def minutes(self, t_now):
-        if self.since is None:
+    def minutes_soc_above_treshold(self, t_now):
+        if self.above_threshold_since is None:
             return 0.0
-        return (t_now - self.since).total_seconds() / 60.0
+        return (t_now - self.above_threshold_since).total_seconds() / 60.0
 
+    def last_time_above_threshold(self):
+        return self.last_above_threshold
 
 def load_soc_state(path):
     """Restore the estimator across a restart.
@@ -211,7 +219,8 @@ def build_state(bus, psystem, system_config, config, simulator, soc_tracker,
 
         since = soc_tracker.update(sim_row.get("SOC_counted"), t_now)
         state["soc_above_threshold_since"] = since.isoformat() if since else None
-        state["minutes_at_full_soc"] = soc_tracker.minutes(t_now)
+        state["minutes_at_full_soc"] = soc_tracker.minutes_soc_above_treshold(t_now)
+        state['last_time_battery_full'] = soc_tracker.last_time_above_threshold()
 
     for sum_var in STATE_VARIABLES_TO_SUM:
         vars_to_sum = [
