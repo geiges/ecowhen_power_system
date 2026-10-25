@@ -90,23 +90,39 @@ class Averager:
         
         for key, value in state.items():
             
-            if not key.endswith('power_w'):
+            if not key.endswith('power_w') :
                 # currently only average current power values
                 continue
         
             if key not in self.past_values:
                 #create new list 
+                try:
+                    float(value)
+                except:
+                    continue  
                 self.past_values[key] = deque([value,])
                 
             else:
-                # add new value to data
-                self.past_values[key].append(value)
+                try:
+                    float(value)
+                except:
+                    value is None  
+                
+                if value is not None:
+                    # add new value to data
+                    self.past_values[key].append(value)
 
-                if len(self.past_values[key]) > self.n_average:     
-                    self.past_values[key].pop(0)
+                    if len(self.past_values[key]) > self.n_average:     
+                        self.past_values[key].popleft()
+                else:
+                    #remove last entry since no new one was added (fading average out)
+                    self.past_values[key].popleft()
+                
             
-            state["averages"][key] = sum(self.past_values[key]) / len(self.past_values[key])
-        
+                if len(self.past_values[key]) > 0:
+                    state["averages"][key] = sum(self.past_values[key]) / len(self.past_values[key])
+                else:
+                    state["averages"][key] = None
         return state
         
         

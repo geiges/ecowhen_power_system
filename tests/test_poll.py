@@ -198,18 +198,47 @@ def test_stale_soc_state_is_discarded_in_favour_of_ocv():
 
 def test_Averager():
     
+    config_default.average_interval = config_default.log_interval * 2
     average = poll.Averager(config_default)
     assert average.n_average == config_default.average_interval / config_default.log_interval
 
+    #Step1
     state = {'mppt1/power_w' : 25,
              'mppt1/voltage' : 18.4}
-    
     average.step(state)
+    
+    #Step2
     state = {'mppt1/power_w' : 35,
              'mppt1/voltage' : 18.4}
     state = average.step(state)
     
     assert state['averages']['mppt1/power_w'] == 30
+    
+    # test limiting of data length
+    
+    #Step3
+    state = {'mppt1/power_w' : 45,
+             'mppt1/voltage' : 18.4}
+    state = average.step(state)
+    
+    
+    assert state['averages']['mppt1/power_w'] == 40
+    
+    
+    # test average fading out 
+    state = {'mppt1/power_w' : None,
+             'mppt1/voltage' : 18.4}
+    state = average.step(state)
+    
+    assert  state['averages']['mppt1/power_w'] == 45
+    
+    
+    state = {'mppt1/power_w' : None,
+             'mppt1/voltage' : 18.4}
+    state = average.step(state)
+    
+    assert  state['averages']['mppt1/power_w'] == None
+    
     
 
 def test_no_soc_state_on_first_boot_is_fine():
