@@ -15,6 +15,7 @@ temperature, so "read the sensors" and "estimate SOC" are not separable steps.
 """
 import json
 from datetime import datetime, timedelta
+from collections import deque
 
 
 # Variables summed across components into a single system-level figure.
@@ -81,7 +82,33 @@ class Averager:
     with zeros.
     """
     def __init__(self, config):
-        pass
+        self.n_average = int(config.average_interval / config.log_interval)
+        self.past_values = dict()
+        
+    def step(self, state):
+        state['averages'] = dict()
+        
+        for key, value in state.items():
+            
+            if not key.endswith('power_w'):
+                # currently only average current power values
+                continue
+        
+            if key not in self.past_values:
+                #create new list 
+                self.past_values[key] = deque([value,])
+                
+            else:
+                # add new value to data
+                self.past_values[key].append(value)
+
+                if len(self.past_values[key]) > self.n_average:     
+                    self.past_values[key].pop(0)
+            
+            state["averages"][key] = sum(self.past_values[key]) / len(self.past_values[key])
+        
+        return state
+        
         
 class SocTracker:
     """Tracks SOC metrics over time
@@ -183,7 +210,7 @@ def restore_simulator(simulator, soc_state, max_age: timedelta, t_now) -> bool:
 
 
 def build_state(bus, psystem, system_config, config, simulator, soc_tracker,
-                t_now, running_since, debug=False) -> dict:
+                state_averager, t_now, running_since, debug=False) -> dict:
     """One full poll. Returns the state contract, or None if D-Bus was unreadable."""
     variables_to_log = system_config["variables_to_log"]
     states_to_log = system_config["states_to_log"]
@@ -229,6 +256,8 @@ def build_state(bus, psystem, system_config, config, simulator, soc_tracker,
         ]
         state[f"system/{sum_var}"] = sum(row_data[x] for x in vars_to_sum)
 
+    # Averages currently all variables ending with power_w
+    state = state_averager.step(state)
     return state
 
 

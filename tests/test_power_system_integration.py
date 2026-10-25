@@ -22,12 +22,12 @@ def real_sim(monkeypatch):
 @pytest.fixture
 def psystem():
     return power_system.Power_system(config_default.system_components)
-
+averager = poll.Averager(config_default)
 
 def _poll(fake_bus, psystem, system_config, sim, tracker, t):
     return poll.build_state(
         fake_bus, psystem, system_config, config_default,
-        simulator=sim, soc_tracker=tracker, t_now=t, running_since=t,
+        simulator=sim, soc_tracker=tracker, state_averager=averager ,t_now=t, running_since=t,
     )
 
 
@@ -155,7 +155,7 @@ def test_setup_publishes_the_topology_contract(fake_bus, runtime_dirs, monkeypat
     monkeypatch.setattr(power_system_main, "paths", runtime_dirs)
 
     tz = pytz.timezone(config_default.tz)
-    system_config, psystem, simulator, tracker = power_system_main.setup(fake_bus, tz)
+    system_config, psystem, simulator, tracker, averager = power_system_main.setup(fake_bus, tz)
 
     written = yaml.safe_load(runtime_dirs.SYSTEM_CONFIG_PATH.read_text())
     assert set(written["components"]) == {

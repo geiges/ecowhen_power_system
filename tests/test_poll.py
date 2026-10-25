@@ -19,12 +19,13 @@ def polled(fake_bus, system_config, monkeypatch):
             "wallbox/power_w": 0.0, "ac_inverter/power_w": 12.0,
         },
     )
+    averager = poll.Averager(config_default)
     psystem = power_system.Power_system(config_default.system_components)
     t_now = datetime(2026, 7, 15, 12, 0, 0)
     state = poll.build_state(
         fake_bus, psystem, system_config, config_default,
         simulator=None, soc_tracker=poll.SocTracker(),
-        t_now=t_now, running_since=t_now,
+        state_averager=averager, t_now=t_now, running_since=t_now,
     )
     return state
 
@@ -195,6 +196,21 @@ def test_stale_soc_state_is_discarded_in_favour_of_ocv():
     assert sim.restored_to is None
     assert sim.initilized is False
 
+def test_Averager():
+    
+    average = poll.Averager(config_default)
+    assert average.n_average == config_default.average_interval / config_default.log_interval
+
+    state = {'mppt1/power_w' : 25,
+             'mppt1/voltage' : 18.4}
+    
+    average.step(state)
+    state = {'mppt1/power_w' : 35,
+             'mppt1/voltage' : 18.4}
+    state = average.step(state)
+    
+    assert state['averages']['mppt1/power_w'] == 30
+    
 
 def test_no_soc_state_on_first_boot_is_fine():
     """The predecessor restored from the Logger's sim CSV, which does not exist on a

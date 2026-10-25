@@ -43,6 +43,7 @@ def setup(bus, tz, debug=False, run_startup_sequence=True):
     t_now = datetime.now(tz=tz)
     simulator = None
     soc_tracker = poll.SocTracker()
+    state_averager = poll.Averager(config)
 
     if config.simulate_system:
         from . import battery_simulation
@@ -54,10 +55,11 @@ def setup(bus, tz, debug=False, run_startup_sequence=True):
             print(f"[power_system] restored SOC={soc_state['soc']:.1%} "
                   f"from {paths.SOC_STATE_PATH}")
 
-    return system_config, psystem, simulator, soc_tracker
+    return system_config, psystem, simulator, soc_tracker, state_averager
 
 
-def run_loop(bus, system_config, psystem, simulator, soc_tracker, tz, debug=False):
+def run_loop(bus, system_config, psystem, simulator, soc_tracker, state_averager, 
+             tz, debug=False):
     running_since = datetime.now(tz=tz)
 
     while True:
@@ -65,7 +67,7 @@ def run_loop(bus, system_config, psystem, simulator, soc_tracker, tz, debug=Fals
 
         state = poll.build_state(
             bus, psystem, system_config, config, simulator, soc_tracker,
-            t_now, running_since, debug,
+            state_averager, t_now, running_since, debug,
         )
 
         if state is not None:
@@ -111,7 +113,7 @@ def main(argv=None) -> int:
         print("[power_system] startup sequence disabled — this process will not "
               "write D-Bus at all")
 
-    system_config, psystem, simulator, soc_tracker = setup(
+    system_config, psystem, simulator, soc_tracker, state_averager = setup(
         bus, tz, args.debug, run_startup_sequence=not args.no_startup_sequence
     )
 
@@ -119,7 +121,7 @@ def main(argv=None) -> int:
         t_now = datetime.now(tz=tz)
         state = poll.build_state(
             bus, psystem, system_config, config, simulator, soc_tracker,
-            t_now, t_now, args.debug,
+            state_averager, t_now, t_now, args.debug,
         )
         if state is None:
             print("[power_system] poll failed")
@@ -129,7 +131,8 @@ def main(argv=None) -> int:
         return 0
 
     print(f"[power_system] polling every {config.log_interval}s")
-    run_loop(bus, system_config, psystem, simulator, soc_tracker, tz, args.debug)
+    run_loop(bus, system_config, psystem, simulator, soc_tracker, state_averager, 
+             tz, args.debug)
     return 0
 
 

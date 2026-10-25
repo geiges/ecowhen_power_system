@@ -11,6 +11,7 @@ from . import components
 date_format = "%y-%m-%d"
 time_format = "%H:%M:%S"
 log_interval = 5 # seconds
+average_interval = 1200 # seconds to average specific state values (see Averager in poll.py)
 round_digits = 4
 tz = 'Europe/Berlin'
 
