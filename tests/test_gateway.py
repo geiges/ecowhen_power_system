@@ -673,10 +673,10 @@ def test_the_agent_list_comes_from_the_config_not_a_literal(client, runtime_dirs
 
     agents = client.get("/control/agents", headers=AUTH).get_json()
     by_name = {a["name"]: a for a in agents}
-
+    
     assert set(by_name) == {"system_safety", "soc_wallbox_charge",
-                            "forecast_wallbox", "wallbox_optimal_charge",
-                            "forecast_ac_solar"}
+                            "wallbox_optimal_charge",
+                            "forecast_ac_solar", "interval_agent"}
     assert by_name["system_safety"]["last_result"]["rationale"] == "OK"
     assert by_name["soc_wallbox_charge"]["last_result"] is None
     assert by_name["system_safety"]["enabled"] is True
@@ -742,10 +742,10 @@ def test_disabling_safety_takes_two_deliberate_flags(client):
 
 def test_enabling_one_wallbox_agent_disables_the_others(client):
     body = client.put("/control/config", headers=AUTH,
-                      json={"agents": {"forecast_wallbox": {"enabled": True}}}).get_json()
+                      json={"agents": {"soc_wallbox_charge": {"enabled": True}}}).get_json()
     agents = body["agents"]
-    assert agents["forecast_wallbox"]["enabled"] is True
-    assert agents["soc_wallbox_charge"]["enabled"] is False
+    # assert agents["forecast_wallbox"]["enabled"] is True
+    assert agents["soc_wallbox_charge"]["enabled"] is True
     assert agents["wallbox_optimal_charge"]["enabled"] is False
 
 

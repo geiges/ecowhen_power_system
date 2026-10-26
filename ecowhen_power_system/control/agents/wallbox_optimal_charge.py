@@ -154,7 +154,7 @@ class WallboxOptimalChargeAgent(BaseAgent):
     def __init__(self, data_dir: Path = None):
         self.data_dir = data_dir if data_dir is not None else paths.DATA_DIR
 
-    def run(self, projection, config) -> AgentResult:
+    def run(self, state, projection, config) -> AgentResult:
         if projection.forecast is None:
             return AgentResult(
                 agent_name=self.name,

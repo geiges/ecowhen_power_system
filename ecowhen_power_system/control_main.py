@@ -31,7 +31,6 @@ from dotenv import load_dotenv
 from . import health, paths
 from .control import actuation
 from .control.agents.forecast_ac_solar import AC_SolarScheduler
-from .control.agents.forecast_wallbox import ForecastWallboxAgent
 from .control.agents.soc_wallbox_charge import SocWallboxChargeAgent
 from .control.agents.system_safety import SystemSafetyAgent
 from .control.agents.wallbox_optimal_charge import WallboxOptimalChargeAgent
@@ -65,7 +64,6 @@ class ControlUnit:
         self.safety = SystemSafetyAgent()
         self.agents = [
             SocWallboxChargeAgent(),
-            ForecastWallboxAgent(),
             WallboxOptimalChargeAgent(),
             AC_SolarScheduler(),
         ]
@@ -126,7 +124,7 @@ class ControlUnit:
             # Manual: safety only. The planners are skipped rather than ignored —
             # `tick` would not look at what they said anyway, and a projection per
             # planner is the expensive half of the cycle.
-            planned_requests, planned_blocks = self._run_planning(projection, cfg, t_now)
+            planned_requests, planned_blocks = self._run_planning(state, projection, cfg, t_now)
             requests += planned_requests
             blocks += planned_blocks
 
@@ -174,13 +172,13 @@ class ControlUnit:
         else:
             self.coordinator.clear_inhibit()
 
-    def _run_planning(self, projection, cfg, t_now) -> tuple:
+    def _run_planning(self, state, projection, cfg, t_now) -> tuple:
         """Ask each agent that is due, and answer for all of them.
 
         Every agent runs on its own clock — `interval_seconds`, 0 meaning every
         tick — so a planner that costs several projections is not paid for on the
         safety cadence. The clock lives here rather than on the agent, which keeps
-        `run` a pure function of `(projection, config)`.
+        `run` a pure function of `(state, projection, config)`.
 
         Returns `(requests, blocks)` for *every* enabled agent, not only the ones
         that ran this tick. That latch is what makes an interval safe: the
@@ -206,7 +204,7 @@ class ControlUnit:
             if last is None or (t_now - last).total_seconds() >= agent.interval(cfg):
                 self._last_run[agent.name] = t_now
                 try:
-                    result = agent.run(projection, cfg)
+                    result = agent.run(state, projection, cfg)
                 except Exception as exc:
                     # It has told us nothing, so it no longer speaks — for the
                     # future via its plan, or for now via its latched answer.

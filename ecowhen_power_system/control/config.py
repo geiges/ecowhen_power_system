@@ -235,16 +235,23 @@ class ForecastAcSolarConfig(_AgentConfig):
     max_windows_per_day: int = knob(
         2, "", "Most times a day the balcony inverter is switched on.")
 
+@dataclass
+class IntervalAgentConfig(_AgentConfig):
+    """ Agent only for testing
+    """
+    pass
 
 @dataclass
 class AgentsConfig:
     system_safety: SystemSafetyConfig = field(default_factory=SystemSafetyConfig)
     soc_wallbox_charge: SocWallboxChargeConfig = field(default_factory=SocWallboxChargeConfig)
-    forecast_wallbox: ForecastWallboxConfig = field(default_factory=ForecastWallboxConfig)
+    #forecast_wallbox: ForecastWallboxConfig = field(default_factory=ForecastWallboxConfig)
     wallbox_optimal_charge: WallboxOptimalChargeConfig = field(
         default_factory=WallboxOptimalChargeConfig)
     forecast_ac_solar: ForecastAcSolarConfig = field(
         default_factory=ForecastAcSolarConfig)
+    interval_agent : IntervalAgentConfig = field(
+        default_factory=IntervalAgentConfig)
 
     @classmethod
     def from_dict(cls, d: dict) -> "AgentsConfig":

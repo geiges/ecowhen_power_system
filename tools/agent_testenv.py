@@ -32,6 +32,8 @@ import sys
 from datetime import timedelta
 from pathlib import Path
 
+
+
 _ROOT = Path(__file__).resolve().parent.parent
 _AGENTS = ["forecast_wallbox", "soc_wallbox_charge", "wallbox_optimal_charge",
            "forecast_ac_solar", "system_safety"]
@@ -50,7 +52,7 @@ _REMOTE_RUNTIME = os.environ.get("ECOPS_REMOTE_RUNTIME",
 
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Control agent test environment")
-    p.add_argument("--agent", choices=_AGENTS, default="forecast_wallbox")
+    p.add_argument("--agent", choices=_AGENTS, default="wallbox_optimal_charge")
     p.add_argument("--no-sync", action="store_true",
                    help="Skip rsync, use existing local copies")
     p.add_argument("--soc", type=float, default=None, metavar="0-1",
@@ -267,7 +269,7 @@ def _build_agent(name, data_dir):
     if name == "wallbox_optimal_charge":
         from ecowhen_power_system.control.agents.wallbox_optimal_charge import WallboxOptimalChargeAgent
         return WallboxOptimalChargeAgent(data_dir)
-    if name == "ac_solar_scheduler":
+    if name == "forecast_ac_solar":
         from ecowhen_power_system.control.agents.forecast_ac_solar import AC_SolarScheduler
         return AC_SolarScheduler()
     from ecowhen_power_system.control.agents.system_safety import SystemSafetyAgent
@@ -341,7 +343,7 @@ def main() -> None:
 
     # -- agent -------------------------------------------------------------------
     print(f"[agent] running {args.agent} ...")
-    result = _build_agent(args.agent, data_dir).run(projection, config)
+    result = _build_agent(args.agent, data_dir).run(state, projection, config)
 
     horizon_end = (projection.steps[-1].time if projection.steps
                    else t_now + timedelta(hours=config.horizon_hours))

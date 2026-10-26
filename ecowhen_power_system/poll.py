@@ -116,7 +116,9 @@ class Averager:
                         self.past_values[key].popleft()
                 else:
                     #remove last entry since no new one was added (fading average out)
-                    self.past_values[key].popleft()
+                    
+                    if len(self.past_values[key]) > 0:  
+                        self.past_values[key].popleft()
                 
             
                 if len(self.past_values[key]) > 0:

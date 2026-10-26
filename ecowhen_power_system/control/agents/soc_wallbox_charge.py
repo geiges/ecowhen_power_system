@@ -43,7 +43,7 @@ class SocWallboxChargeAgent(BaseAgent):
     name = "soc_wallbox_charge"
     interval_seconds = 0        # cheap, and it is the one that says "charge now"
 
-    def run(self, projection, config) -> AgentResult:
+    def run(self, state, projection, config) -> AgentResult:
         current = projection.current
         cfg = config.agents.soc_wallbox_charge
 

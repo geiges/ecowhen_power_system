@@ -60,7 +60,7 @@ class AC_SolarScheduler(BaseAgent):
     name = "forecast_ac_solar"
     interval_seconds = 300      # the forecast moves hourly; this is cheap either way
 
-    def run(self, projection, config) -> AgentResult:
+    def run(self, state, projection, config) -> AgentResult:
         forecast = projection.forecast
         if forecast is None:
             return AgentResult(
@@ -96,6 +96,24 @@ class AC_SolarScheduler(BaseAgent):
         total_wh = sum(w for t, w in yield_w.items()
                        if any(b.start <= t < b.end for b in bookings))
 
+         #realtime assessment of actual AC solar input
+         
+        average_recent_AC_power = state.averages.get("ac_inverter/power_w", None)
+         
+        if average_recent_AC_power is not None and average_recent_AC_power > 75:
+             
+            #make short-term booking to continue AC solar, independent of 
+            # planing based on the forecast. Make it lasting for the duration
+            # of the interval and one minute more to ensure next evaluation
+            # is still with the current realtime booking
+            booking = Booking(
+                 mode='ac_solar', 
+                 start=t_now, 
+                 end=t_now + timedelta(seconds =AC_SolarScheduler.interval_seconds + 60),
+                 reason = f'Average recent AC solar is sufficient high({average_recent_AC_power:.0f}W)'
+                 )
+            bookings.append(booking)
+     
         if bookings:
             window_strs = [f"{b.start.strftime('%m-%d %H:%M')}–{b.end.strftime('%H:%M')}"
                            for b in bookings]
@@ -104,7 +122,9 @@ class AC_SolarScheduler(BaseAgent):
         else:
             rationale = (f"no windows — balcony forecast never reaches "
                          f"{cfg.min_yield_w:.0f}W in the horizon")
-
+        
+       
+            
         return AgentResult(
             agent_name=self.name,
             rationale=rationale,

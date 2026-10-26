@@ -39,13 +39,14 @@ class CurrentState:
     mppt_150_power_w: float       # W
     mppt_100_power_w: float       # W
     minutes_at_full_soc: float    # published by the Power System's SocTracker
+    averages : dict
     # The standalone probes, {short_name: °C} — everything publishing a plain
     # `<component>/temperature`. Collected by key rather than named one by one, so
     # a sensor added to `config_default.system_components` is supervised without a
     # second edit. A probe that stops reporting drops out of the dict and out of
     # the safety metrics with it: absent is not 0 °C.
     sensor_temps: dict = field(default_factory=dict)
-
+    
 
 def _float(state: dict, key: str, default=None):
     try:
@@ -53,6 +54,12 @@ def _float(state: dict, key: str, default=None):
     except (KeyError, TypeError, ValueError):
         return default
 
+def _dict(state: dict, key:str, default=dict()):
+    
+    if key in state.keys():
+        return state[key]
+    else:
+        return default
 
 def read_current_state(path=None, max_age_seconds: float = 120.0,
                        _now: datetime = None) -> CurrentState:
@@ -117,5 +124,7 @@ def read_current_state(path=None, max_age_seconds: float = 120.0,
         mppt_150_power_w=_float(state, "mppt150/power_yield", 0.0),
         mppt_100_power_w=_float(state, "mppt100/power_yield", 0.0),
         minutes_at_full_soc=_float(state, "minutes_at_full_soc", 0.0),
+        averages=_dict(state, "averages"),
         sensor_temps=sensor_temps,
+        
     )

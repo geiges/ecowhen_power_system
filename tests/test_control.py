@@ -93,6 +93,7 @@ def state_factory():
             mppt_150_power_w=200.0,
             mppt_100_power_w=100.0,
             minutes_at_full_soc=0.0,
+            averages = dict(),
         )
         values.update(overrides)
         return CurrentState(**values)
@@ -339,15 +340,15 @@ def test_heat_memory_is_per_instance(config, projection_factory):
 # The SOC agent — a request, not a sequence
 # ---------------------------------------------------------------------------
 
-def test_a_long_full_battery_requests_the_wallbox(config, projection_factory):
+def test_a_long_full_battery_requests_the_wallbox(config, state_factory, projection_factory):
     projection = projection_factory(soc=1.0, minutes_at_full_soc=45.0)
-    result = SocWallboxChargeAgent().run(projection, config)
+    result = SocWallboxChargeAgent().run(state_factory, projection, config)
     assert [(r.mode, r.active) for r in result.requests] == [("wallbox", True)]
 
 
-def test_a_low_battery_releases_it(config, projection_factory):
+def test_a_low_battery_releases_it(config, state_factory,projection_factory):
     projection = projection_factory(soc=0.1, minutes_at_full_soc=0.0)
-    result = SocWallboxChargeAgent().run(projection, config)
+    result = SocWallboxChargeAgent().run(state_factory,projection, config)
     assert [(r.mode, r.active) for r in result.requests] == [("wallbox", False)]
 
 
@@ -371,52 +372,52 @@ def _windows(result):
     return [(b.start.hour, b.end.hour) for b in result.bookings]
 
 
-def test_no_forecast_means_the_agent_says_nothing(config, projection_factory):
-    result = AC_SolarScheduler().run(projection_factory(), config)
+def test_no_forecast_means_the_agent_says_nothing(config, state_factory, projection_factory):
+    result = AC_SolarScheduler().run(state_factory,projection_factory(), config)
     assert result.bookings == []
     assert "no solar forecast" in result.rationale
 
 
 def test_the_window_covers_exactly_the_hours_above_the_threshold(
-        config, projection_factory, forecast_factory, ac_solar_clock):
+        config, state_factory, projection_factory, forecast_factory, ac_solar_clock):
     # 08 09 10 11 12 13
     forecast = forecast_factory([20, 90, 150, 400, 120, 60], start=ac_solar_clock)
-    result = AC_SolarScheduler().run(
+    result = AC_SolarScheduler().run(state_factory(),
         projection_factory(forecast=forecast), config)
 
     assert _windows(result) == [(10, 13)]        # end exclusive: off at 13:00
     assert [b.mode for b in result.bookings] == ["ac_solar"]
 
 
-def test_the_threshold_is_configurable(config, projection_factory,
+def test_the_threshold_is_configurable(config, state_factory, projection_factory,
                                        forecast_factory, ac_solar_clock):
     forecast = forecast_factory([20, 90, 150, 400, 120, 60], start=ac_solar_clock)
     config.agents.forecast_ac_solar.min_yield_w = 50.0
     result = AC_SolarScheduler().run(
-        projection_factory(forecast=forecast), config)
+        state_factory(), projection_factory(forecast=forecast), config)
 
     assert _windows(result) == [(9, 14)]
 
 
 def test_a_gap_below_the_threshold_splits_the_day_in_two(
-        config, projection_factory, forecast_factory, ac_solar_clock):
+        config, state_factory, projection_factory, forecast_factory, ac_solar_clock):
     #                    08   09   10  11   12   13
     forecast = forecast_factory([200, 200, 10, 200, 200, 10], start=ac_solar_clock)
     result = AC_SolarScheduler().run(
-        projection_factory(forecast=forecast), config)
+        state_factory(), projection_factory(forecast=forecast), config)
 
     assert _windows(result) == [(8, 10), (11, 13)]
 
 
 def test_a_third_run_is_merged_into_its_nearest_neighbour_not_dropped(
-        config, projection_factory, forecast_factory, ac_solar_clock):
+        config, state_factory, projection_factory, forecast_factory, ac_solar_clock):
     """Three runs, two windows allowed. The excess hours cost standby power; dropping
     a run would cost the yield instead, so the smallest gap is closed."""
     #                    08   09  10   11  12   13   14   15  16   17
     forecast = forecast_factory([200, 10, 200, 10, 200, 200, 200, 10, 10, 200],
                                 start=ac_solar_clock)
     result = AC_SolarScheduler().run(
-        projection_factory(forecast=forecast), config)
+        state_factory(), projection_factory(forecast=forecast), config)
 
     # 08-09, 10-11 and 12-15 are one hour apart; 17-18 is two. So the first pair
     # merges and the far one survives on its own.
@@ -424,38 +425,53 @@ def test_a_third_run_is_merged_into_its_nearest_neighbour_not_dropped(
 
 
 def test_the_number_of_windows_is_configurable(
-        config, projection_factory, forecast_factory, ac_solar_clock):
+        config, state_factory,projection_factory, forecast_factory, ac_solar_clock):
     forecast = forecast_factory([200, 10, 200, 10, 200], start=ac_solar_clock)
     config.agents.forecast_ac_solar.max_windows_per_day = 3
     result = AC_SolarScheduler().run(
-        projection_factory(forecast=forecast), config)
+        state_factory(), projection_factory(forecast=forecast), config)
     assert _windows(result) == [(8, 9), (10, 11), (12, 13)]
 
     config.agents.forecast_ac_solar.max_windows_per_day = 1
     result = AC_SolarScheduler().run(
-        projection_factory(forecast=forecast), config)
+        state_factory(), projection_factory(forecast=forecast), config)
     assert _windows(result) == [(8, 13)]
 
 
 def test_each_day_gets_its_own_window_budget(
-        config, projection_factory, forecast_factory, ac_solar_clock):
+        config, state_factory, projection_factory, forecast_factory, ac_solar_clock):
     """Two windows a day, not two in the plan — a four-day forecast is four days of
     switching, and capping the plan would leave day four unplanned."""
     day = [200, 10, 200] + [0] * 21          # 08:00, gap, 10:00, then dark
     forecast = forecast_factory(day * 3, start=ac_solar_clock)
     result = AC_SolarScheduler().run(
-        projection_factory(forecast=forecast), config)
+        state_factory(), projection_factory(forecast=forecast), config)
 
     assert len(result.bookings) == 6
     assert len({b.start.date() for b in result.bookings}) == 3
 
+def test_realtime_sufficient_AC_input_generates_additional_booking_for_next_interval(
+        config, state_factory, projection_factory, forecast_factory, ac_solar_clock):
+    """Two windows a day, not two in the plan — a four-day forecast is four days of
+    switching, and capping the plan would leave day four unplanned."""
+    day = [200, 10, 200] + [0] * 21          # 08:00, gap, 10:00, then dark
+    forecast = forecast_factory(day * 3, start=ac_solar_clock)
+    result = AC_SolarScheduler().run(
+        state_factory(averages= {
+            "ac_inverter/power_w" : 100}
+            ), projection_factory(forecast=forecast), config)
+
+    assert len(result.bookings) == 7
+    
+    assert len({b.start.date() for b in result.bookings}) == 3
+
 
 def test_hours_already_past_are_not_booked(
-        config, projection_factory, forecast_factory, ac_solar_clock):
+        config, state_factory, projection_factory, forecast_factory, ac_solar_clock):
     """The forecast CSV carries the whole day, including this morning."""
     forecast = forecast_factory([200] * 12, start=ac_solar_clock - timedelta(hours=4))
     result = AC_SolarScheduler().run(
-        projection_factory(forecast=forecast), config)
+        state_factory(), projection_factory(forecast=forecast), config)
 
     assert _windows(result) == [(8, 16)]      # not (4, 16)
 
@@ -736,7 +752,7 @@ def _slow_agent(bookings_from, bookings_until):
     # Subclasses the real base class rather than restating its protocol: an agent
     # gained `interval` and a duplicate would have kept passing until it didn't.
     class Slow(BaseAgent):
-        name = "forecast_wallbox"
+        name = "slow_agent"
         interval_seconds = 300
         runs = 0
         enabled = True
@@ -744,7 +760,7 @@ def _slow_agent(bookings_from, bookings_until):
         def is_enabled(self, config):
             return self.enabled
 
-        def run(self, projection, config):
+        def run(self, state, projection, config):
             Slow.runs += 1
             return AgentResult(agent_name=self.name, rationale="window",
                                bookings=[Booking(mode="wallbox",
@@ -771,7 +787,7 @@ def test_a_planning_agents_booking_survives_the_ticks_between_planning_cycles(un
         unit.cycle()
 
     assert agent.runs == 1, "the slow agent must not be re-run every cycle"
-    assert unit.modes["wallbox"].requesters == {"forecast_wallbox"}
+    assert unit.modes["wallbox"].requesters == {"slow_agent"}
 
 
 def test_a_booking_releases_the_mode_when_its_interval_ends(unit, runtime_dirs):
@@ -781,7 +797,7 @@ def test_a_booking_releases_the_mode_when_its_interval_ends(unit, runtime_dirs):
     unit.agents = [_slow_agent(t - timedelta(hours=2), t + timedelta(seconds=30))]
 
     unit.cycle()
-    assert unit.modes["wallbox"].requesters == {"forecast_wallbox"}
+    assert unit.modes["wallbox"].requesters == {"slow_agent"}
 
     # One tick later the window has closed. The agent has not run again and does not
     # need to: the booking says when it ends.
@@ -797,7 +813,7 @@ def test_a_disabled_planning_agent_stops_driving_its_plan(unit, runtime_dirs):
     unit.agents = [agent]
 
     unit.cycle()
-    assert unit.modes["wallbox"].requesters == {"forecast_wallbox"}
+    assert unit.modes["wallbox"].requesters == {"slow_agent"}
 
     agent.enabled = False
     unit.cycle()
@@ -812,7 +828,7 @@ def test_an_agent_that_raises_stops_driving_its_plan(unit, runtime_dirs):
     unit.agents = [agent]
 
     unit.cycle()
-    assert unit.modes["wallbox"].requesters == {"forecast_wallbox"}
+    assert unit.modes["wallbox"].requesters == {"slow_agent"}
 
     def boom(projection, config):
         raise RuntimeError("forecast unreachable")
@@ -832,7 +848,7 @@ def _interval_agent(seconds):
     from ecowhen_power_system.control.coordinator import ModeRequest
 
     class Periodic(BaseAgent):
-        name = "forecast_wallbox"
+        name = "interval_agent"
         interval_seconds = seconds
         runs = 0
         enabled = True
@@ -840,7 +856,7 @@ def _interval_agent(seconds):
         def is_enabled(self, config):
             return self.enabled
 
-        def run(self, projection, config):
+        def run(self, state, projection, config):
             Periodic.runs += 1
             return AgentResult(
                 agent_name=self.name, rationale="wants it",
@@ -875,7 +891,7 @@ def test_a_slow_agents_request_survives_the_ticks_between_its_runs(unit, runtime
 
     for i in range(4):
         unit.cycle(t_now=t + timedelta(seconds=10 * i))
-        assert unit.modes["wallbox"].requesters == {"forecast_wallbox"}, \
+        assert unit.modes["wallbox"].requesters == {"interval_agent"}, \
             "the mode must not flap on the ticks between the agent's runs"
 
 
@@ -888,14 +904,14 @@ def test_a_slow_agent_that_changes_its_mind_is_heard_on_its_next_run(unit,
     unit.agents = [agent]
 
     unit.cycle(t_now=t)
-    assert unit.modes["wallbox"].requesters == {"forecast_wallbox"}
+    assert unit.modes["wallbox"].requesters == {"interval_agent"}
 
     from ecowhen_power_system.control.agents.base import AgentResult
     agent.run = lambda projection, config: AgentResult(
         agent_name=agent.name, rationale="not any more")
 
     unit.cycle(t_now=t + timedelta(seconds=60))
-    assert unit.modes["wallbox"].requesters == {"forecast_wallbox"}, \
+    assert unit.modes["wallbox"].requesters == {"interval_agent"}, \
         "not due yet — the old answer still stands"
 
     unit.cycle(t_now=t + timedelta(seconds=300))
@@ -911,7 +927,7 @@ def test_a_disabled_agent_drops_its_latched_request_too(unit, runtime_dirs):
     unit.agents = [agent]
 
     unit.cycle(t_now=t)
-    assert unit.modes["wallbox"].requesters == {"forecast_wallbox"}
+    assert unit.modes["wallbox"].requesters == {"interval_agent"}
 
     agent.enabled = False
     unit.cycle(t_now=t + timedelta(seconds=10))
@@ -925,7 +941,7 @@ def test_an_agent_that_raises_drops_its_latched_request_too(unit, runtime_dirs):
     unit.agents = [agent]
 
     unit.cycle(t_now=t)
-    assert unit.modes["wallbox"].requesters == {"forecast_wallbox"}
+    assert unit.modes["wallbox"].requesters == {"interval_agent"}
 
     def boom(projection, config):
         raise RuntimeError("nope")
@@ -937,10 +953,10 @@ def test_an_agent_that_raises_drops_its_latched_request_too(unit, runtime_dirs):
 
 def test_the_interval_is_overridable_from_the_config(unit, runtime_dirs):
     agent = _interval_agent(300)
-    unit.config.agents.forecast_wallbox.interval_seconds = 30
+    unit.config.agents.interval_agent.interval_seconds = 30
     assert agent.interval(unit.config) == 30
 
-    unit.config.agents.forecast_wallbox.interval_seconds = None
+    unit.config.agents.interval_agent.interval_seconds = None
     assert agent.interval(unit.config) == 300, "None means the agent's own"
 
 
@@ -951,7 +967,7 @@ def test_an_inhibit_suppresses_the_calendar_without_deleting_it(unit, runtime_di
     unit.agents = [_slow_agent(t - timedelta(minutes=5), t + timedelta(hours=4))]
 
     unit.cycle()
-    assert unit.modes["wallbox"].requesters == {"forecast_wallbox"}
+    assert unit.modes["wallbox"].requesters == {"slow_agent"}
 
     unit.coordinator.inhibit("test")
     unit.coordinator.tick(unit.config)
@@ -960,7 +976,7 @@ def test_an_inhibit_suppresses_the_calendar_without_deleting_it(unit, runtime_di
 
     unit.coordinator.clear_inhibit()
     unit.coordinator.tick(unit.config)
-    assert unit.modes["wallbox"].requesters == {"forecast_wallbox"}
+    assert unit.modes["wallbox"].requesters == {"slow_agent"}
 
 
 def test_manual_runs_safety_only_and_drives_nothing(unit, runtime_dirs):
@@ -975,7 +991,7 @@ def test_manual_runs_safety_only_and_drives_nothing(unit, runtime_dirs):
     unit.agents = [agent]
 
     unit.cycle()
-    assert unit.modes["wallbox"].requesters == {"forecast_wallbox"}
+    assert unit.modes["wallbox"].requesters == {"interval_agent"}
     assert unit.gateway.commands, "auto drives the prerequisites"
 
     unit.config.control_mode = "manual"
@@ -989,7 +1005,7 @@ def test_manual_runs_safety_only_and_drives_nothing(unit, runtime_dirs):
     assert unit.gateway.commands == [], "manual never writes hardware"
     assert agent.runs == runs, "only the safety agent runs in manual"
     assert unit.modes["wallbox"].state == frozen, "the graph is paused, not ticking"
-    assert unit.modes["wallbox"].requesters == {"forecast_wallbox"}, \
+    assert unit.modes["wallbox"].requesters == {"interval_agent"}, \
         "paused, not released — auto resumes where it left off"
 
     unit.config.control_mode = "auto"
