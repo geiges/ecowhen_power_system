@@ -62,6 +62,7 @@ class Generic_Battery(object):
     max_safety_load_watt : float    # in Watt
     hardware = None
     component_actuators = []        # nothing to switch, but the registry still asks
+    capacity_wh: float
 
     def __init__(self,
                  short_name,
@@ -88,6 +89,7 @@ class Generic_Battery(object):
         self.min_safety_temperature = spec['min_temp']
         self.max_safety_temperature = spec['max_temp']
         self.max_safety_load_watt = spec['max_charge_rate'] * self.nominal_voltage * self.Q_tot
+        self.capacity_wh = self.nominal_voltage * self.Q_tot
         
     def init_simulation_model(self,
                               R0,

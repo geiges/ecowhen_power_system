@@ -219,8 +219,9 @@ class WallboxOptimalChargeConfig(_AgentConfig):
     horizon_days: int = knob(
         4, "d", "How far ahead the forecast is optimised over.")
     min_storage_fraction: float = knob(
-        0.25, "0–1", "Share of the battery kept back for the house.")
-
+        0.20, "0–1", "Share of the battery kept back for the house.")
+    min_storage_fraction_charge: float = knob(
+        0.15, "0–0.5", "Share of the battery kept back for the house.", editable=True)
 
 @dataclass
 class ForecastAcSolarConfig(_AgentConfig):

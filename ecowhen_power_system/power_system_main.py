@@ -51,7 +51,7 @@ def setup(bus, tz, debug=False, run_startup_sequence=True):
         simulator = battery_simulation.Battery_Simulation(config.battery, debug)
         soc_state = poll.load_soc_state(paths.SOC_STATE_PATH)
         if poll.restore_simulator(simulator, soc_state, MAX_SOC_STATE_AGE, t_now):
-            soc_tracker.since = soc_state["soc_above_threshold_since"]
+            soc_tracker.above_threshold_since = soc_state["soc_above_threshold_since"]
             print(f"[power_system] restored SOC={soc_state['soc']:.1%} "
                   f"from {paths.SOC_STATE_PATH}")
 
@@ -78,7 +78,7 @@ def run_loop(bus, system_config, psystem, simulator, soc_tracker, state_averager
                     soc=state["SOC_counted"],
                     rc_voltage=float(simulator.Kf.x[1, 0]),
                     t_now=t_now,
-                    soc_above_threshold_since=soc_tracker.since,
+                    soc_above_threshold_since=soc_tracker.above_threshold_since,
                 )
 
         # A poll that produced no state is `error`, not silence: the process is
@@ -138,3 +138,4 @@ def main(argv=None) -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+    

@@ -45,6 +45,7 @@ class Battery_Simulation:
         self.low_battery_SOC = battery.SOC_low
 
         # Capacity in As throughout; the config declares Ah.
+        self.capacity_wh = battery.capacity_wh
         self.total_capacity = battery.Q_tot * 3600
         self.actual_capacity = self.total_capacity
         self._current = 0.0                     # charge positive, as Victron reports
@@ -70,6 +71,9 @@ class Battery_Simulation:
         self.Kf = None
         self.initilized = False
         self.t_previous = None
+        
+        self.voltage_full = SPECS_BATTERY_CELL[battery.cell_type]['full_voltage'] * battery.n_cells
+        print('Voltage of the battery when full is {self.voltage_full}')
 
     # -- the battery model ---------------------------------------------------
 
@@ -239,10 +243,19 @@ class Battery_Simulation:
                     self.set_state_of_charge(0.0)
 
             self.t_previous = t_now
+            
+       
+            
 
         sim_data["OCV_est"] = OCV_est
-        sim_data["SOC_Kf"] = float(self.Kf.x[0, 0])
-        sim_data["SOC_counted"] = self.state_of_charge
+        if voltage > self.voltage_full:
+            print('Setting SOC to 100%')
+            sim_data["SOC_Kf"] = 1.0
+            sim_data["SOC_counted"] = 1.0
+
+        else:
+            sim_data["SOC_Kf"] = float(self.Kf.x[0, 0])
+            sim_data["SOC_counted"] = self.state_of_charge
 
         print(f"SOC estimated: {sim_data['SOC_Kf']} / "
               f"counted: {sim_data['SOC_counted']}", end=' - ')

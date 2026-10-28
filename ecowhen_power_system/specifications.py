@@ -12,6 +12,7 @@ SPECS_BATTERY_CELL = {
              {"nominal_voltage" : 3.2, # in V
               "max_voltage" : 3.60,   # abs max 3.65
               "min_voltage" : 3.0,    # abs in 2.8
+              "full_voltage" : 3.55,
               "max_charge_rate" : 0.5,  # in C
               "max_temp": 45,         # in °C
               "min_temp" : 5,         # in °C
